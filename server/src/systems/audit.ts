@@ -7,6 +7,8 @@ import { supabase } from "../lib/supabase.js"
 export interface ToolCallAudit {
   chatId: string
   userId: string
+  /** id da mensagem do assistente que originou a chamada (liga os passos à resposta). */
+  messageId?: string
   toolName: string
   input: unknown
   output: unknown
@@ -26,6 +28,7 @@ export async function auditToolCall(rec: ToolCallAudit): Promise<void> {
     status: rec.status,
     duration_ms: rec.durationMs,
   }
+  if (rec.messageId) row.message_id = rec.messageId
   if (rec.traceId) row.trace_id = rec.traceId
 
   const { error } = await supabase.from("agent_tool_calls").insert(row)

@@ -16,6 +16,12 @@ export interface ModelInfo {
   provider: Provider
   /** id real passado ao provider (pode diferir do id do seletor). */
   model: string
+  /**
+   * Teto de saída do modelo na API síncrona (Messages API). Em Opus/Sonnet 5 o
+   * `max_tokens` cobre thinking + texto, então pedir pouco corta a resposta no
+   * meio (era o bug do artefato truncado).
+   */
+  maxOutputTokens: number
 }
 
 export interface ProbedModel extends ModelInfo {
@@ -25,11 +31,29 @@ export interface ProbedModel extends ModelInfo {
 }
 
 const REGISTRY: ModelInfo[] = [
-  { id: "claude-sonnet-5", label: "Claude Sonnet 5", provider: "anthropic", model: "claude-sonnet-5" },
-  { id: "claude-opus-5", label: "Claude Opus 5", provider: "anthropic", model: "claude-opus-5" },
-  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", provider: "anthropic", model: "claude-haiku-4-5-20251001" },
-  { id: config.OLLAMA_MODEL, label: `${config.OLLAMA_MODEL} (self-hosted)`, provider: "ollama", model: config.OLLAMA_MODEL },
+  { id: "claude-sonnet-5", label: "Claude Sonnet 5", provider: "anthropic", model: "claude-sonnet-5", maxOutputTokens: 128_000 },
+  { id: "claude-opus-5", label: "Claude Opus 5", provider: "anthropic", model: "claude-opus-5", maxOutputTokens: 128_000 },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", provider: "anthropic", model: "claude-haiku-4-5-20251001", maxOutputTokens: 64_000 },
+  { id: config.OLLAMA_MODEL, label: `${config.OLLAMA_MODEL} (self-hosted)`, provider: "ollama", model: config.OLLAMA_MODEL, maxOutputTokens: config.OLLAMA_NUM_CTX },
 ]
+
+/**
+ * Teto pedido por requisição. Bem acima do que uma resposta de chat precisa
+ * (uma landing page HTML completa fica na casa dos 10–15k tokens) e longe do
+ * limite do modelo, para não deixar uma única geração correr por minutos.
+ * Se ainda assim o modelo bater no teto, o agent-loop emenda a continuação.
+ */
+const DEFAULT_RESPONSE_MAX_TOKENS = 32_000
+
+/** Fallback quando o id não está no registry (ex.: modelo vindo do ambiente). */
+const FALLBACK_MAX_OUTPUT_TOKENS = 8_192
+
+/** `max_tokens` a pedir para este modelo, já limitado pelo teto do provider. */
+export function responseMaxTokens(model: string): number {
+  const info = REGISTRY.find((m) => m.model === model || m.id === model)
+  const cap = info?.maxOutputTokens ?? FALLBACK_MAX_OUTPUT_TOKENS
+  return Math.min(cap, DEFAULT_RESPONSE_MAX_TOKENS)
+}
 
 const PROBE_TIMEOUT_MS = 2500
 const PROBE_CACHE_TTL_MS = 30_000
@@ -75,6 +99,7 @@ export function resolveModel(id?: string): ModelInfo {
       label: config.ANTHROPIC_MODEL,
       provider: "anthropic",
       model: config.ANTHROPIC_MODEL,
+      maxOutputTokens: FALLBACK_MAX_OUTPUT_TOKENS,
     }
   )
 }

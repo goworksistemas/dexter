@@ -539,3 +539,301 @@ end;
 $$;
 
 revoke all on function public.dexter_ckl_ranking(text, timestamptz, timestamptz, integer) from public, anon, authenticated;
+
+
+-- ============================================================================
+-- Modular filter layer (migration dexter_checkgo_modular +
+-- dexter_checkgo_modular_fix_dimensoes_scope) -- adds combinable filters on
+-- top of the fixed summaries above. Reuses the same gate/scope helpers:
+-- dexter_resolve_profile, dexter_can_read_formulario,
+-- dexter_unidade_authorized.
+-- ============================================================================
+
+
+-- ============================================================================
+-- 6. dexter_ckl_aplicacoes_busca: aplicacoes com filtro combinavel por
+--    unidade/formulario (ilike parcial)/status/periodo, paginado (cap 200).
+--    Gate + escopo iguais as demais (dept via formulario, unidade explicita
+--    via dexter_unidade_authorized).
+-- ============================================================================
+create or replace function public.dexter_ckl_aplicacoes_busca(
+  p_email text,
+  p_unidade text default null,
+  p_formulario text default null,
+  p_status text default null,
+  p_data_ini timestamptz default null,
+  p_data_fim timestamptz default null,
+  p_limit integer default 50
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_profile public.profiles%rowtype;
+  v_is_staff boolean;
+  v_limit integer;
+  v_result jsonb;
+begin
+  v_profile := public.dexter_resolve_profile(p_email);
+  v_is_staff := v_profile.role in ('admin', 'dev');
+  v_limit := least(greatest(coalesce(p_limit, 50), 1), 200);
+
+  if not public.dexter_unidade_authorized(v_profile, p_unidade) then
+    raise exception 'sem_acesso' using errcode = '42501';
+  end if;
+
+  with base as (
+    select
+      a.id,
+      a.status,
+      a.responsavel,
+      a.aplicado_em,
+      a.finalizado_em,
+      amb.unidade,
+      amb.nome as ambiente_nome,
+      f.nome as formulario_nome,
+      s.percentual_final
+    from public.ckl_aplicacoes a
+    join public.ckl_ambientes amb on amb.id = a.ambiente_id
+    join public.ckl_formularios f on f.id = a.formulario_id
+    left join public.ckl_scores s on s.aplicacao_id = a.id
+    where (p_data_ini is null or a.aplicado_em >= p_data_ini)
+      and (p_data_fim is null or a.aplicado_em <= p_data_fim)
+      and (p_unidade is null or lower(amb.unidade) = lower(trim(p_unidade)))
+      and (p_formulario is null or f.nome ilike '%' || trim(p_formulario) || '%')
+      and (p_status is null or a.status = p_status)
+      and (v_is_staff or public.dexter_can_read_formulario(v_profile, f.id))
+  ),
+  pagina as (
+    select *
+    from base
+    order by aplicado_em desc
+    limit v_limit
+  )
+  select jsonb_build_object(
+    'has_access', true,
+    'is_staff', v_is_staff,
+    'filtros', jsonb_build_object(
+      'unidade', p_unidade,
+      'formulario', p_formulario,
+      'status', p_status,
+      'data_ini', p_data_ini,
+      'data_fim', p_data_fim,
+      'limit', v_limit
+    ),
+    'total', (select count(*) from base),
+    'lista', coalesce((select jsonb_agg(to_jsonb(pagina)) from pagina), '[]'::jsonb)
+  )
+  into v_result;
+
+  return v_result;
+end;
+$$;
+
+revoke all on function public.dexter_ckl_aplicacoes_busca(text, text, text, text, timestamptz, timestamptz, integer) from public, anon, authenticated;
+
+
+-- ============================================================================
+-- 7. dexter_ckl_scores_busca: mesma agregacao de dexter_ckl_scores, mas com
+--    filtro adicional por formulario (ilike parcial) e quebra tambem por
+--    formulario, alem de por unidade. Criada como funcao nova (nao substitui
+--    dexter_ckl_scores) para nao alterar a assinatura ja em uso.
+-- ============================================================================
+create or replace function public.dexter_ckl_scores_busca(
+  p_email text,
+  p_unidade text default null,
+  p_formulario text default null,
+  p_data_ini timestamptz default null,
+  p_data_fim timestamptz default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_profile public.profiles%rowtype;
+  v_is_staff boolean;
+  v_result jsonb;
+begin
+  v_profile := public.dexter_resolve_profile(p_email);
+  v_is_staff := v_profile.role in ('admin', 'dev');
+
+  if not public.dexter_unidade_authorized(v_profile, p_unidade) then
+    raise exception 'sem_acesso' using errcode = '42501';
+  end if;
+
+  with base as (
+    select
+      s.aplicacao_id,
+      s.percentual_final,
+      s.status,
+      a.aplicado_em,
+      amb.unidade,
+      f.nome as formulario_nome
+    from public.ckl_scores s
+    join public.ckl_aplicacoes a on a.id = s.aplicacao_id
+    join public.ckl_ambientes amb on amb.id = a.ambiente_id
+    join public.ckl_formularios f on f.id = a.formulario_id
+    where (p_data_ini is null or a.aplicado_em >= p_data_ini)
+      and (p_data_fim is null or a.aplicado_em <= p_data_fim)
+      and (p_unidade is null or lower(amb.unidade) = lower(trim(p_unidade)))
+      and (p_formulario is null or f.nome ilike '%' || trim(p_formulario) || '%')
+      and (v_is_staff or public.dexter_can_read_formulario(v_profile, f.id))
+  ),
+  por_unidade as (
+    select
+      unidade,
+      count(*) as total_aplicacoes,
+      round(avg(percentual_final), 2) as media_percentual_final,
+      count(*) filter (where status = 'approved') as aprovadas,
+      count(*) filter (where status = 'attention') as atencao,
+      count(*) filter (where status = 'rejected') as reprovadas
+    from base
+    group by unidade
+    order by unidade
+    limit 50
+  ),
+  por_formulario as (
+    select
+      formulario_nome,
+      count(*) as total_aplicacoes,
+      round(avg(percentual_final), 2) as media_percentual_final,
+      count(*) filter (where status = 'approved') as aprovadas,
+      count(*) filter (where status = 'attention') as atencao,
+      count(*) filter (where status = 'rejected') as reprovadas
+    from base
+    group by formulario_nome
+    order by formulario_nome
+    limit 50
+  )
+  select jsonb_build_object(
+    'has_access', true,
+    'is_staff', v_is_staff,
+    'filtros', jsonb_build_object(
+      'unidade', p_unidade,
+      'formulario', p_formulario,
+      'data_ini', p_data_ini,
+      'data_fim', p_data_fim
+    ),
+    'resumo', (
+      select jsonb_build_object(
+        'total_aplicacoes', count(*),
+        'media_percentual_final', round(avg(percentual_final), 2),
+        'aprovadas', count(*) filter (where status = 'approved'),
+        'atencao', count(*) filter (where status = 'attention'),
+        'reprovadas', count(*) filter (where status = 'rejected')
+      )
+      from base
+    ),
+    'por_unidade', coalesce((select jsonb_agg(to_jsonb(por_unidade)) from por_unidade), '[]'::jsonb),
+    'por_formulario', coalesce((select jsonb_agg(to_jsonb(por_formulario)) from por_formulario), '[]'::jsonb)
+  )
+  into v_result;
+
+  return v_result;
+end;
+$$;
+
+revoke all on function public.dexter_ckl_scores_busca(text, text, text, timestamptz, timestamptz) from public, anon, authenticated;
+
+
+-- ============================================================================
+-- 8. dexter_dimensoes: valores distintos disponiveis para popular filtros no
+--    escopo do usuario (unidades / formularios / ambientes /
+--    status_aplicacao). Staff enxerga o universo completo (ckl_unidades /
+--    ckl_ambientes); usuario comum so enxerga o que e alcancavel pelos
+--    formularios do seu departamento (dexter_can_read_formulario) e, quando
+--    tem unidade_ids explicito, apenas essas unidades
+--    (dexter_unidade_authorized). Importante: unidades/ambientes NAO sao
+--    filtrados via ckl_formularios.ambiente_id -- esse campo e apenas a
+--    referencia/default do formulario, nao uma restricao de dominio (um
+--    formulario sem metadados->'unidadeIds' aplica-se a qualquer unidade,
+--    exatamente como dexter_ckl_scores_busca/aplicacoes_busca ja retornam
+--    dados de qualquer unidade uma vez que dexter_can_read_formulario e
+--    verdadeiro). Gate: e-mail sem profile -> 42501.
+-- ============================================================================
+create or replace function public.dexter_dimensoes(p_email text, p_dimensao text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_profile public.profiles%rowtype;
+  v_is_staff boolean;
+  v_dim text;
+  v_valores jsonb;
+begin
+  v_profile := public.dexter_resolve_profile(p_email);
+  v_is_staff := v_profile.role in ('admin', 'dev');
+  v_dim := lower(trim(p_dimensao));
+
+  if v_dim not in ('unidades', 'formularios', 'ambientes', 'status_aplicacao') then
+    raise exception 'dimensao_invalida: use unidades, formularios, ambientes ou status_aplicacao' using errcode = '22023';
+  end if;
+
+  if v_dim = 'unidades' then
+    if v_is_staff then
+      select coalesce(jsonb_agg(distinct u.nome order by u.nome), '[]'::jsonb)
+        into v_valores
+      from public.ckl_unidades u;
+    else
+      select coalesce(jsonb_agg(distinct u.nome order by u.nome), '[]'::jsonb)
+        into v_valores
+      from public.ckl_unidades u
+      where public.dexter_unidade_authorized(v_profile, u.nome)
+        and exists (
+          select 1
+          from public.ckl_formularios f
+          where f.ativo and public.dexter_can_read_formulario(v_profile, f.id)
+        );
+    end if;
+
+  elsif v_dim = 'formularios' then
+    select coalesce(jsonb_agg(distinct f.nome order by f.nome), '[]'::jsonb)
+      into v_valores
+    from public.ckl_formularios f
+    where f.ativo
+      and (v_is_staff or public.dexter_can_read_formulario(v_profile, f.id));
+
+  elsif v_dim = 'ambientes' then
+    if v_is_staff then
+      select coalesce(jsonb_agg(distinct amb.nome order by amb.nome), '[]'::jsonb)
+        into v_valores
+      from public.ckl_ambientes amb;
+    else
+      select coalesce(jsonb_agg(distinct amb.nome order by amb.nome), '[]'::jsonb)
+        into v_valores
+      from public.ckl_ambientes amb
+      where public.dexter_unidade_authorized(v_profile, amb.unidade)
+        and exists (
+          select 1
+          from public.ckl_formularios f
+          where f.ativo and public.dexter_can_read_formulario(v_profile, f.id)
+        );
+    end if;
+
+  elsif v_dim = 'status_aplicacao' then
+    select coalesce(jsonb_agg(distinct a.status order by a.status), '[]'::jsonb)
+      into v_valores
+    from public.ckl_aplicacoes a
+    join public.ckl_ambientes amb on amb.id = a.ambiente_id
+    join public.ckl_formularios f on f.id = a.formulario_id
+    where a.status is not null
+      and (v_is_staff or public.dexter_can_read_formulario(v_profile, f.id))
+      and public.dexter_unidade_authorized(v_profile, amb.unidade);
+  end if;
+
+  return jsonb_build_object(
+    'has_access', true,
+    'is_staff', v_is_staff,
+    'dimensao', v_dim,
+    'valores', v_valores
+  );
+end;
+$$;
+
+revoke all on function public.dexter_dimensoes(text, text) from public, anon, authenticated;

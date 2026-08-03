@@ -351,3 +351,268 @@ end;
 $$;
 
 revoke all on function public.dexter_open_activities(text, uuid, int) from public, anon, authenticated;
+
+-- ============================================================================
+-- 5) dexter_deals_busca(p_email text, p_account_id uuid default null,
+--    p_owner text default null, p_estagio text default null,
+--    p_contato text default null, p_status text default null,
+--    p_limit int default 50)
+--    Modular/filterable deal search for the resolved tenant. Every filter is
+--    optional and AND-combined. p_owner/p_estagio/p_contato match by
+--    substring (ilike) against owner full_name / stage name / contact name.
+--    p_status matches public.deal_status (open/won/lost), case-insensitive,
+--    with a small pt-BR synonym map (aberto/ganho/perdido, ...). Returns one
+--    row per deal PLUS a total_count column (window count over the full
+--    filtered set, unaffected by p_limit) so callers can tell "50 of 137"
+--    apart from "50 of 50". p_limit is clamped to [1, 100].
+--    Gate: public.dexter_resolve_account (sem_acesso / 42501 on failure).
+-- ============================================================================
+create or replace function public.dexter_deals_busca(
+  p_email text,
+  p_account_id uuid default null,
+  p_owner text default null,
+  p_estagio text default null,
+  p_contato text default null,
+  p_status text default null,
+  p_limit int default 50
+)
+returns table (
+  total_count bigint,
+  deal_id uuid,
+  title text,
+  value numeric,
+  currency text,
+  status text,
+  stage_name text,
+  pipeline_name text,
+  contact_name text,
+  owner_name text,
+  expected_close date,
+  updated_at timestamptz
+)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_account_id uuid;
+  v_limit int;
+  v_status text;
+begin
+  select ra.account_id into v_account_id
+  from public.dexter_resolve_account(p_email, p_account_id) ra;
+
+  v_limit := least(greatest(coalesce(p_limit, 50), 1), 100);
+
+  if p_status is not null then
+    v_status := lower(trim(p_status));
+    v_status := case v_status
+      when 'aberto' then 'open'
+      when 'aberta' then 'open'
+      when 'ganho' then 'won'
+      when 'ganha' then 'won'
+      when 'perdido' then 'lost'
+      when 'perdida' then 'lost'
+      else v_status
+    end;
+  end if;
+
+  return query
+  select count(*) over()::bigint,
+         d.id,
+         d.title,
+         d.value,
+         d.currency,
+         d.status::text,
+         s.name,
+         pl.name,
+         c.name,
+         pr.full_name,
+         d.expected_close,
+         d.updated_at
+  from public.deals d
+  join public.stages s on s.id = d.stage_id
+  join public.pipelines pl on pl.id = d.pipeline_id
+  join public.contacts c on c.id = d.contact_id
+  left join public.profiles pr on pr.id = d.owner_id
+  where d.account_id = v_account_id
+    and (p_owner is null or pr.full_name ilike '%' || p_owner || '%')
+    and (p_estagio is null or s.name ilike '%' || p_estagio || '%')
+    and (p_contato is null or c.name ilike '%' || p_contato || '%')
+    and (v_status is null or d.status::text = v_status)
+  order by d.updated_at desc
+  limit v_limit;
+end;
+$$;
+
+revoke all on function public.dexter_deals_busca(text, uuid, text, text, text, text, int) from public, anon, authenticated;
+
+-- ============================================================================
+-- 6) dexter_atividades_busca(p_email text, p_account_id uuid default null,
+--    p_tipo text default null, p_owner text default null,
+--    p_pendentes boolean default true, p_limit int default 50)
+--    Modular/filterable activity search for the resolved tenant. p_tipo
+--    matches public.activity_type (note/call/email/task/meeting),
+--    case-insensitive, with a small pt-BR synonym map. p_owner matches by
+--    substring (ilike) against the activity creator's full_name.
+--    p_pendentes (default true) restricts to not-done activities, matching
+--    dexter_open_activities' existing behavior; pass false to see both done
+--    and pending activities. Returns one row per activity PLUS a total_count
+--    column (window count over the full filtered set, unaffected by
+--    p_limit). p_limit is clamped to [1, 100].
+--    Gate: public.dexter_resolve_account (sem_acesso / 42501 on failure).
+-- ============================================================================
+create or replace function public.dexter_atividades_busca(
+  p_email text,
+  p_account_id uuid default null,
+  p_tipo text default null,
+  p_owner text default null,
+  p_pendentes boolean default true,
+  p_limit int default 50
+)
+returns table (
+  total_count bigint,
+  activity_id uuid,
+  activity_type text,
+  content text,
+  due_at timestamptz,
+  done boolean,
+  contact_name text,
+  deal_title text,
+  created_by_name text
+)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_account_id uuid;
+  v_limit int;
+  v_tipo text;
+begin
+  select ra.account_id into v_account_id
+  from public.dexter_resolve_account(p_email, p_account_id) ra;
+
+  v_limit := least(greatest(coalesce(p_limit, 50), 1), 100);
+
+  if p_tipo is not null then
+    v_tipo := lower(trim(p_tipo));
+    v_tipo := case v_tipo
+      when 'nota' then 'note'
+      when 'ligacao' then 'call'
+      when 'ligação' then 'call'
+      when 'chamada' then 'call'
+      when 'e-mail' then 'email'
+      when 'tarefa' then 'task'
+      when 'reuniao' then 'meeting'
+      when 'reunião' then 'meeting'
+      else v_tipo
+    end;
+  end if;
+
+  return query
+  select count(*) over()::bigint,
+         a.id,
+         a.type::text,
+         a.content,
+         a.due_at,
+         a.done,
+         c.name,
+         d.title,
+         pr.full_name
+  from public.activities a
+  left join public.contacts c on c.id = a.contact_id
+  left join public.deals d on d.id = a.deal_id
+  left join public.profiles pr on pr.id = a.created_by
+  where a.account_id = v_account_id
+    and (not p_pendentes or a.done = false)
+    and (v_tipo is null or a.type::text = v_tipo)
+    and (p_owner is null or pr.full_name ilike '%' || p_owner || '%')
+  order by a.due_at asc nulls last
+  limit v_limit;
+end;
+$$;
+
+revoke all on function public.dexter_atividades_busca(text, uuid, text, text, boolean, int) from public, anon, authenticated;
+
+-- ============================================================================
+-- 7) dexter_dimensoes(p_email text, p_account_id uuid default null, p_dimensao text)
+--    Distinct filter values for the resolved tenant, so a caller (or Dexter
+--    itself) can discover valid inputs for dexter_deals_busca /
+--    dexter_atividades_busca before calling them. p_dimensao (case-insensitive)
+--    selects the dimension:
+--      'pipelines'        -> distinct pipeline names (tenant-scoped)
+--      'estagios'         -> distinct stage names (tenant-scoped, across all
+--                            pipelines; use dexter_pipeline_summary to see
+--                            stage<->pipeline pairing)
+--      'owners'           -> distinct active profile full_names (tenant-scoped)
+--      'tipos_atividade'  -> the full public.activity_type enum (global, not
+--                            tenant data -- these are the only valid p_tipo
+--                            values for dexter_atividades_busca)
+--      'status_deals' / 'status' -> the full public.deal_status enum (global
+--                            -- the only valid p_status values for
+--                            dexter_deals_busca)
+--    Any other p_dimensao raises 'dimensao_invalida' (errcode 22023).
+--    Gate: public.dexter_resolve_account (sem_acesso / 42501 on failure).
+-- ============================================================================
+create or replace function public.dexter_dimensoes(
+  p_email text,
+  p_account_id uuid default null,
+  p_dimensao text default null
+)
+returns table (valor text)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_account_id uuid;
+  v_dimensao text;
+begin
+  select ra.account_id into v_account_id
+  from public.dexter_resolve_account(p_email, p_account_id) ra;
+
+  v_dimensao := lower(trim(coalesce(p_dimensao, '')));
+
+  if v_dimensao = 'pipelines' then
+    return query
+    select distinct pl.name
+    from public.pipelines pl
+    where pl.account_id = v_account_id
+    order by 1
+    limit 200;
+
+  elsif v_dimensao = 'estagios' then
+    return query
+    select distinct s.name
+    from public.stages s
+    where s.account_id = v_account_id
+    order by 1
+    limit 200;
+
+  elsif v_dimensao = 'owners' then
+    return query
+    select distinct pr.full_name
+    from public.profiles pr
+    where pr.account_id = v_account_id
+      and pr.is_active = true
+    order by 1
+    limit 200;
+
+  elsif v_dimensao = 'tipos_atividade' then
+    return query
+    select unnest(enum_range(null::public.activity_type))::text
+    order by 1;
+
+  elsif v_dimensao in ('status_deals', 'status') then
+    return query
+    select unnest(enum_range(null::public.deal_status))::text
+    order by 1;
+
+  else
+    raise exception 'dimensao_invalida: %', p_dimensao using errcode = '22023';
+  end if;
+end;
+$$;
+
+revoke all on function public.dexter_dimensoes(text, uuid, text) from public, anon, authenticated;

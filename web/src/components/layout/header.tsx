@@ -1,42 +1,48 @@
-import { LogOut, Menu, Monitor, Moon, Settings, Sun, UserRound } from "lucide-react"
-import { useNavigate } from "react-router-dom"
-import { toast } from "sonner"
+import { Menu, Monitor, Moon, Sun } from "lucide-react"
+import { Link, useLocation } from "react-router-dom"
 
+import { ConnectionsDialog } from "@/components/chat/connections-dialog"
+import { ModelSelector } from "@/components/chat/model-selector"
 import { Button } from "@/components/ui/button"
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { useTheme } from "@/providers/theme-provider"
-import { useAuth } from "@/providers/auth-provider"
 import { useSidebar } from "@/hooks/use-sidebar"
 import { useChats } from "@/lib/chats"
-import { ConnectionsDialog } from "@/components/chat/connections-dialog"
-import { ModelSelector } from "@/components/chat/model-selector"
+import { useProjects } from "@/lib/projects"
 import { updateProfileTheme } from "@/lib/supabase"
-import type { Theme } from "@/providers/theme-provider"
+import { useAuth } from "@/providers/auth-provider"
+import { useTheme, type Theme } from "@/providers/theme-provider"
 
-function initials(name?: string, email?: string | null): string {
-  const source = (name || email || "?").trim()
-  const parts = source.split(/\s+/).filter(Boolean)
-  if (parts.length >= 2) {
-    return `${parts[0]![0]}${parts[1]![0]}`.toUpperCase()
-  }
-  return source.slice(0, 2).toUpperCase()
+const PAGE_TITLES: Record<string, string> = {
+  "/chats": "Conversas",
+  "/projects": "Projetos",
+  "/artifacts": "Artefatos",
+  "/settings": "Configurações",
 }
 
+/**
+ * Header da área principal: contexto da rota atual + ferramentas do chat.
+ * Conta e configurações vivem na sidebar; o controle de colapso também —
+ * aqui fica apenas o abridor do drawer no mobile.
+ */
 export function Header() {
   const { theme, setTheme } = useTheme()
   const { toggle } = useSidebar()
   const { activeChat } = useChats()
-  const { user, signOut, refreshProfile } = useAuth()
-  const navigate = useNavigate()
-  const tituloConversa = activeChat?.title ?? "Nova conversa"
+  const { projects, activeProject } = useProjects()
+  const { refreshProfile } = useAuth()
+  const { pathname } = useLocation()
+
+  const projectDetailId = pathname.match(/^\/projects\/([^/]+)/)?.[1]
+  const detailProject = projectDetailId
+    ? projects.find((p) => p.id === projectDetailId)
+    : undefined
+  const pageTitle = PAGE_TITLES[pathname]
+  const isChatRoute = !pageTitle && !projectDetailId
 
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor
 
@@ -45,44 +51,70 @@ export function Header() {
     void updateProfileTheme(next)
       .then(() => refreshProfile())
       .catch(() => {
-        /* local já aplicou; DB falhou — settings pode corrigir */
+        /* local já aplicou */
       })
   }
 
-  const handleSignOut = async () => {
-    try {
-      await signOut()
-      toast.success("Sessão encerrada.")
-      navigate("/login", { replace: true })
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Falha ao sair.")
-    }
-  }
-
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border bg-card px-3 text-card-foreground sm:px-4">
-      <div className="flex min-w-0 items-center gap-2">
+    <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border/50 px-3 sm:px-4">
+      <div className="flex min-w-0 items-center gap-1.5">
         <Button
           variant="ghost"
-          size="icon"
-          className="md:hidden"
+          size="icon-sm"
+          className="-ml-1 shrink-0 md:hidden"
           aria-label="Abrir menu de conversas"
           onClick={toggle}
         >
           <Menu className="size-5" />
         </Button>
-        <h1 className="truncate text-sm font-medium text-foreground">
-          {tituloConversa}
-        </h1>
+
+        {projectDetailId ? (
+          <nav
+            aria-label="Trilha de navegação"
+            className="flex min-w-0 items-center gap-1.5 text-sm"
+          >
+            <Link
+              to="/projects"
+              className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Projetos
+            </Link>
+            <span aria-hidden className="text-muted-foreground/50">
+              /
+            </span>
+            <span className="min-w-0 truncate font-medium text-foreground/90">
+              {detailProject?.name ?? "Projeto"}
+            </span>
+          </nav>
+        ) : pageTitle ? (
+          <h1 className="truncate text-sm font-medium text-foreground/90">
+            {pageTitle}
+          </h1>
+        ) : (
+          <div className="min-w-0 leading-tight">
+            <h1 className="truncate text-sm font-medium text-foreground/90">
+              {activeChat?.title ?? "Nova conversa"}
+            </h1>
+            {activeProject ? (
+              <p className="truncate text-[11px] text-muted-foreground">
+                {activeProject.name}
+              </p>
+            ) : null}
+          </div>
+        )}
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
-        <ConnectionsDialog />
-        <ModelSelector />
+        {isChatRoute ? (
+          <>
+            <ConnectionsDialog />
+            <ModelSelector />
+          </>
+        ) : null}
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" aria-label="Alternar tema">
+            <Button variant="ghost" size="icon-sm" aria-label="Alternar tema">
               <ThemeIcon className="size-4" />
             </Button>
           </DropdownMenuTrigger>
@@ -98,50 +130,6 @@ export function Header() {
             <DropdownMenuItem onSelect={() => handleTheme("system")}>
               <Monitor className="size-4" />
               Sistema
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="rounded-full"
-              aria-label="Menu do usuário"
-            >
-              <Avatar size="sm">
-                {user?.avatarUrl ? (
-                  <AvatarImage src={user.avatarUrl} alt={user.name || "Avatar"} />
-                ) : null}
-                <AvatarFallback>
-                  {initials(user?.name, user?.email)}
-                </AvatarFallback>
-              </Avatar>
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-56">
-            <DropdownMenuLabel className="font-normal">
-              <div className="flex flex-col gap-0.5">
-                <span className="flex items-center gap-1.5 text-sm font-medium">
-                  <UserRound className="size-3.5 text-muted-foreground" />
-                  {user?.name || "Usuário"}
-                </span>
-                {user?.email ? (
-                  <span className="truncate text-xs text-muted-foreground">
-                    {user.email}
-                  </span>
-                ) : null}
-              </div>
-            </DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => navigate("/settings")}>
-              <Settings className="size-4" />
-              Configurações
-            </DropdownMenuItem>
-            <DropdownMenuItem variant="destructive" onSelect={() => void handleSignOut()}>
-              <LogOut className="size-4" />
-              Sair
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

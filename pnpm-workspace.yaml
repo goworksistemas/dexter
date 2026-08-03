@@ -1,0 +1,10 @@
+packages:
+  - server
+  - web
+
+# pnpm 10 bloqueia postinstall por padrão; estes precisam rodar para os binários nativos.
+onlyBuiltDependencies:
+  - esbuild
+  - '@tailwindcss/oxide'
+  - oxlint
+  - unrs-resolver

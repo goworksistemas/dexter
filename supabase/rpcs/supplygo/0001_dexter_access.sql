@@ -381,3 +381,349 @@ revoke all on function public.dexter_vendas_ml_resumo(text, int, int) from publi
 
 comment on function public.dexter_vendas_ml_resumo(text, int, int) is
   'Dexter: vendas no Mercado Livre no período — pedidos por status/valor, envios por status, top produtos vendidos (cap p_limit<=50). Gate: dexter_supplygo_pode (42501 se negado).';
+
+
+-- =============================================================================
+-- Camada MODULAR — filtros por fornecedor/status/comprador/período/produto e
+-- dimensões (valores distintos), complementando os resumos fixos acima.
+-- Mesmo padrão: SECURITY DEFINER, SET search_path='', schema-qualificadas,
+-- REVOKE ALL FROM public/anon/authenticated, gate via dexter_supplygo_pode.
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- 5) dexter_compras_busca(p_email, p_fornecedor, p_status, p_comprador,
+--    p_data_ini, p_data_fim, p_limit) — busca filtrável cruzando as 3 etapas
+--    do funil de compras (Solicitação de Compra, Cotação, Pedido de Compra).
+--    Fornecedor: SC não tem fornecedor (etapa anterior à cotação/pedido), por
+--    isso o filtro de fornecedor só se aplica a cotações (via
+--    cmp_cotacoes_fornecedores) e pedidos (fornecedor_id direto). Comprador:
+--    ilike em profiles.nome via comprador_id (mesmo campo nas 3 tabelas onde
+--    existe). Período: created_at::date entre p_data_ini/p_data_fim (ambos
+--    opcionais). Gate: dexter_supplygo_pode.
+-- -----------------------------------------------------------------------------
+create or replace function public.dexter_compras_busca(
+  p_email text,
+  p_fornecedor text default null,
+  p_status text default null,
+  p_comprador text default null,
+  p_data_ini date default null,
+  p_data_fim date default null,
+  p_limit int default 50
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_limit int := least(greatest(coalesce(p_limit, 50), 1), 50);
+  v_fornecedor text := nullif(trim(p_fornecedor), '');
+  v_status text := nullif(trim(p_status), '');
+  v_comprador text := nullif(trim(p_comprador), '');
+  v_result jsonb;
+begin
+  if not coalesce(public.dexter_supplygo_pode(p_email), false) then
+    raise exception 'sem_acesso' using errcode = '42501';
+  end if;
+
+  with sc as (
+    select
+      s.id, s.numero, s.status, s.created_at, s.prioridade,
+      c.nome as comprador,
+      coalesce((
+        select sum(i.quantidade * coalesce(i.preco_estimado, 0))
+        from public.cmp_solicitacoes_compra_itens i
+        where i.solicitacao_id = s.id
+      ), 0) as valor_estimado
+    from public.cmp_solicitacoes_compra s
+    left join public.profiles c on c.id = s.comprador_id
+    where (v_status is null or s.status ilike v_status)
+      and (v_comprador is null or c.nome ilike '%' || v_comprador || '%')
+      and (p_data_ini is null or s.created_at::date >= p_data_ini)
+      and (p_data_fim is null or s.created_at::date <= p_data_fim)
+  ),
+  cot as (
+    select
+      q.id, q.numero, q.titulo, q.status, q.created_at,
+      c.nome as comprador,
+      coalesce((
+        select jsonb_agg(distinct coalesce(f.nome_fantasia, f.razao_social))
+        from public.cmp_cotacoes_fornecedores cf
+        join public.cmp_fornecedores f on f.id = cf.fornecedor_id
+        where cf.cotacao_id = q.id
+      ), '[]'::jsonb) as fornecedores
+    from public.cmp_cotacoes q
+    left join public.profiles c on c.id = q.comprador_id
+    where (v_status is null or q.status ilike v_status)
+      and (v_comprador is null or c.nome ilike '%' || v_comprador || '%')
+      and (p_data_ini is null or q.created_at::date >= p_data_ini)
+      and (p_data_fim is null or q.created_at::date <= p_data_fim)
+      and (
+        v_fornecedor is null
+        or exists (
+          select 1
+          from public.cmp_cotacoes_fornecedores cf
+          join public.cmp_fornecedores f on f.id = cf.fornecedor_id
+          where cf.cotacao_id = q.id
+            and (f.razao_social ilike '%' || v_fornecedor || '%' or f.nome_fantasia ilike '%' || v_fornecedor || '%')
+        )
+      )
+  ),
+  ped as (
+    select
+      p.id, p.numero, p.status, p.created_at,
+      coalesce(f.nome_fantasia, f.razao_social) as fornecedor,
+      c.nome as comprador,
+      coalesce((
+        select sum(i.quantidade * i.preco_unitario)
+        from public.cmp_pedidos_compra_itens i
+        where i.pedido_id = p.id
+      ), 0) as valor_total
+    from public.cmp_pedidos_compra p
+    join public.cmp_fornecedores f on f.id = p.fornecedor_id
+    left join public.profiles c on c.id = p.comprador_id
+    where (v_status is null or p.status ilike v_status)
+      and (v_comprador is null or c.nome ilike '%' || v_comprador || '%')
+      and (v_fornecedor is null or f.razao_social ilike '%' || v_fornecedor || '%' or f.nome_fantasia ilike '%' || v_fornecedor || '%')
+      and (p_data_ini is null or p.created_at::date >= p_data_ini)
+      and (p_data_fim is null or p.created_at::date <= p_data_fim)
+  )
+  select jsonb_build_object(
+    'filtros', jsonb_build_object(
+      'fornecedor', v_fornecedor,
+      'status', v_status,
+      'comprador', v_comprador,
+      'data_ini', p_data_ini,
+      'data_fim', p_data_fim,
+      'limit', v_limit
+    ),
+    'solicitacoes_compra', jsonb_build_object(
+      'total', (select count(*) from sc),
+      'itens', coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'id', x.id,
+          'numero', x.numero,
+          'status', x.status,
+          'created_at', x.created_at,
+          'prioridade', x.prioridade,
+          'comprador', x.comprador,
+          'valor_estimado', x.valor_estimado
+        ) order by x.created_at desc)
+        from (select * from sc order by created_at desc limit v_limit) x
+      ), '[]'::jsonb)
+    ),
+    'cotacoes', jsonb_build_object(
+      'total', (select count(*) from cot),
+      'itens', coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'id', x.id,
+          'numero', x.numero,
+          'titulo', x.titulo,
+          'status', x.status,
+          'created_at', x.created_at,
+          'comprador', x.comprador,
+          'fornecedores', x.fornecedores
+        ) order by x.created_at desc)
+        from (select * from cot order by created_at desc limit v_limit) x
+      ), '[]'::jsonb)
+    ),
+    'pedidos_compra', jsonb_build_object(
+      'total', (select count(*) from ped),
+      'itens', coalesce((
+        select jsonb_agg(jsonb_build_object(
+          'id', x.id,
+          'numero', x.numero,
+          'status', x.status,
+          'created_at', x.created_at,
+          'fornecedor', x.fornecedor,
+          'comprador', x.comprador,
+          'valor_total', x.valor_total
+        ) order by x.created_at desc)
+        from (select * from ped order by created_at desc limit v_limit) x
+      ), '[]'::jsonb)
+    )
+  )
+  into v_result;
+
+  return v_result;
+end;
+$$;
+
+revoke all on function public.dexter_compras_busca(text, text, text, text, date, date, int) from public, anon, authenticated;
+
+comment on function public.dexter_compras_busca(text, text, text, text, date, date, int) is
+  'Dexter: busca filtrável de compras cruzando SC/Cotação/Pedido — filtros opcionais por fornecedor (ilike, aplica a cotação e pedido), status (ilike, por etapa), comprador (ilike em profiles.nome via comprador_id) e período (created_at::date). Retorna total + lista (cap p_limit<=50) por etapa. Gate: dexter_supplygo_pode (42501 se negado).';
+
+
+-- -----------------------------------------------------------------------------
+-- 6) dexter_vendas_ml_busca(p_email, p_status, p_produto, p_dias, p_limit) —
+--    busca filtrável de vendas no Mercado Livre por status do pedido e/ou
+--    produto (ilike em ml_pedidos_itens.titulo), na janela de p_dias.
+--    Gate: dexter_supplygo_pode.
+-- -----------------------------------------------------------------------------
+create or replace function public.dexter_vendas_ml_busca(
+  p_email text,
+  p_status text default null,
+  p_produto text default null,
+  p_dias int default 30,
+  p_limit int default 50
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_dias int := greatest(coalesce(p_dias, 30), 1);
+  v_limit int := least(greatest(coalesce(p_limit, 50), 1), 50);
+  v_status text := nullif(trim(p_status), '');
+  v_produto text := nullif(trim(p_produto), '');
+  v_result jsonb;
+begin
+  if not coalesce(public.dexter_supplygo_pode(p_email), false) then
+    raise exception 'sem_acesso' using errcode = '42501';
+  end if;
+
+  with pe as (
+    select p.*
+    from public.ml_pedidos p
+    where p.data_criacao >= now() - make_interval(days => v_dias)
+      and (v_status is null or p.status ilike v_status)
+      and (
+        v_produto is null
+        or exists (
+          select 1
+          from public.ml_pedidos_itens i
+          where i.ml_pedido_id = p.id
+            and i.titulo ilike '%' || v_produto || '%'
+        )
+      )
+  )
+  select jsonb_build_object(
+    'filtros', jsonb_build_object(
+      'status', v_status,
+      'produto', v_produto,
+      'dias', v_dias,
+      'limit', v_limit
+    ),
+    'total', (select count(*) from pe),
+    'itens', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id', x.id,
+        'ml_order_id', x.ml_order_id,
+        'status', x.status,
+        'status_detail', x.status_detail,
+        'data_criacao', x.data_criacao,
+        'total', x.total,
+        'produtos', coalesce((
+          select jsonb_agg(jsonb_build_object(
+            'titulo', i.titulo,
+            'quantidade', i.quantidade,
+            'preco_unitario', i.preco_unitario
+          ))
+          from public.ml_pedidos_itens i
+          where i.ml_pedido_id = x.id
+        ), '[]'::jsonb)
+      ) order by x.data_criacao desc)
+      from (select * from pe order by data_criacao desc limit v_limit) x
+    ), '[]'::jsonb)
+  )
+  into v_result;
+
+  return v_result;
+end;
+$$;
+
+revoke all on function public.dexter_vendas_ml_busca(text, text, text, int, int) from public, anon, authenticated;
+
+comment on function public.dexter_vendas_ml_busca(text, text, text, int, int) is
+  'Dexter: busca filtrável de vendas no Mercado Livre — status (ilike) e/ou produto (ilike em ml_pedidos_itens.titulo), janela de p_dias. Retorna total + lista (cap p_limit<=50). Gate: dexter_supplygo_pode (42501 se negado).';
+
+
+-- -----------------------------------------------------------------------------
+-- 7) dexter_dimensoes(p_email, p_dimensao) — valores distintos para popular
+--    filtros no lado do Dexter (autocomplete/opções), sem precisar hardcodar
+--    listas. p_dimensao aceita: 'fornecedores', 'status_sc', 'status_cotacao',
+--    'status_pedido', 'compradores', 'status_ml', 'produtos'. Qualquer outro
+--    valor levanta erro (22023). Gate: dexter_supplygo_pode.
+-- -----------------------------------------------------------------------------
+create or replace function public.dexter_dimensoes(p_email text, p_dimensao text)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_dimensao text := lower(trim(coalesce(p_dimensao, '')));
+  v_valores jsonb;
+begin
+  if not coalesce(public.dexter_supplygo_pode(p_email), false) then
+    raise exception 'sem_acesso' using errcode = '42501';
+  end if;
+
+  case v_dimensao
+    when 'fornecedores' then
+      select coalesce(jsonb_agg(x.nome order by x.nome), '[]'::jsonb)
+      into v_valores
+      from (
+        select distinct coalesce(f.nome_fantasia, f.razao_social) as nome
+        from public.cmp_fornecedores f
+        where f.ativo
+      ) x;
+
+    when 'status_sc' then
+      select coalesce(jsonb_agg(x.status order by x.status), '[]'::jsonb)
+      into v_valores
+      from (select distinct status from public.cmp_solicitacoes_compra) x;
+
+    when 'status_cotacao' then
+      select coalesce(jsonb_agg(x.status order by x.status), '[]'::jsonb)
+      into v_valores
+      from (select distinct status from public.cmp_cotacoes) x;
+
+    when 'status_pedido' then
+      select coalesce(jsonb_agg(x.status order by x.status), '[]'::jsonb)
+      into v_valores
+      from (select distinct status from public.cmp_pedidos_compra) x;
+
+    when 'compradores' then
+      select coalesce(jsonb_agg(x.nome order by x.nome), '[]'::jsonb)
+      into v_valores
+      from (
+        select distinct p.nome
+        from public.profiles p
+        where p.ativo
+          and p.status = 'aprovado'
+          and p.role in ('admin', 'diretor', 'gestor', 'comprador')
+      ) x;
+
+    when 'status_ml' then
+      select coalesce(jsonb_agg(x.status order by x.status), '[]'::jsonb)
+      into v_valores
+      from (select distinct status from public.ml_pedidos) x;
+
+    when 'produtos' then
+      select coalesce(jsonb_agg(x.nome order by x.nome), '[]'::jsonb)
+      into v_valores
+      from (
+        select distinct pr.nome
+        from public.prd_produtos pr
+        where pr.ativo
+        limit 200
+      ) x;
+
+    else
+      raise exception 'dimensao_invalida: %', v_dimensao using errcode = '22023';
+  end case;
+
+  return jsonb_build_object('dimensao', v_dimensao, 'valores', v_valores);
+end;
+$$;
+
+revoke all on function public.dexter_dimensoes(text, text) from public, anon, authenticated;
+
+comment on function public.dexter_dimensoes(text, text) is
+  'Dexter: valores distintos por dimensão (fornecedores/status_sc/status_cotacao/status_pedido/compradores/status_ml/produtos) para alimentar filtros das buscas modulares. Erro 22023 se p_dimensao for desconhecida. Gate: dexter_supplygo_pode (42501 se negado).';

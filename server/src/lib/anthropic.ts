@@ -12,6 +12,7 @@
 import Anthropic from "@anthropic-ai/sdk"
 
 import { config } from "../config.js"
+import { responseMaxTokens } from "../llm/models.js"
 
 let client: Anthropic | null = null
 
@@ -40,10 +41,11 @@ export interface AnthropicStreamHandle {
 
 /** Inicia o streaming de uma resposta na Anthropic. */
 export function streamChatAnthropic(opts: AnthropicStreamOptions): AnthropicStreamHandle {
+  const model = opts.model ?? config.ANTHROPIC_MODEL
   const stream = getClient().messages.stream(
     {
-      model: opts.model ?? config.ANTHROPIC_MODEL,
-      max_tokens: opts.maxTokens ?? 8192,
+      model,
+      max_tokens: opts.maxTokens ?? responseMaxTokens(model),
       system: opts.systemPrompt,
       messages: opts.messages,
     },

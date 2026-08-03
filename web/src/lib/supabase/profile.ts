@@ -6,11 +6,15 @@ import { userToProfile } from "./auth"
 
 function parsePreferences(raw: unknown): UserPreferences {
   if (!raw || typeof raw !== "object") return {}
-  const theme = (raw as { theme?: unknown }).theme
-  if (theme === "light" || theme === "dark" || theme === "system") {
-    return { theme }
+  const obj = raw as { theme?: unknown; sidebarCollapsed?: unknown }
+  const prefs: UserPreferences = {}
+  if (obj.theme === "light" || obj.theme === "dark" || obj.theme === "system") {
+    prefs.theme = obj.theme
   }
-  return {}
+  if (typeof obj.sidebarCollapsed === "boolean") {
+    prefs.sidebarCollapsed = obj.sidebarCollapsed
+  }
+  return prefs
 }
 
 /** Carrega perfil da tabela public.profiles; fallback para user_metadata. */

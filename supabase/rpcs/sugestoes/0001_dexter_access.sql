@@ -268,3 +268,261 @@ revoke all on function public.dexter_sugestoes_top(text, text, text, int) from p
 
 comment on function public.dexter_sugestoes_top(text, text, text, int) is
   'Dexter: lista enxuta das sugestões mais votadas (sem campos internos sensíveis), escopada aos sistemas em que o email é admin. Filtros opcionais por sistema e status. Gate: sem_acesso (42501) se sem admin em nenhum sistema, ou sistema fora do escopo.';
+
+
+-- ---------------------------------------------------------------------
+-- 4) dexter_sugestoes_busca(p_email, p_sistema_slug, p_status, p_categoria,
+--    p_tipo, p_impacto, p_texto, p_limit) -> jsonb
+--    Camada modular: busca filtrável e enxuta (sem campos internos
+--    sensíveis), escopada aos sistemas em que o email é admin.
+--    p_texto faz ilike no título. Substitui os resumos fixos por filtros
+--    livres combináveis (sistema/status/categoria/tipo/impacto/texto).
+-- ---------------------------------------------------------------------
+create or replace function public.dexter_sugestoes_busca(
+  p_email text,
+  p_sistema_slug text default null,
+  p_status text default null,
+  p_categoria text default null,
+  p_tipo text default null,
+  p_impacto text default null,
+  p_texto text default null,
+  p_limit int default 50
+)
+returns jsonb
+language plpgsql
+security definer
+stable
+set search_path = ''
+as $$
+declare
+  v_admin_ids uuid[] := public.dexter_admin_sistema_ids(p_email);
+  v_sistema_id uuid;
+  v_status public.status_interno;
+  v_categoria public.categoria_sugestao;
+  v_tipo public.tipo_sugestao;
+  v_impacto public.impacto_nivel;
+  v_limit int := least(greatest(coalesce(p_limit, 50), 1), 200);
+  v_texto text := nullif(trim(coalesce(p_texto, '')), '');
+  v_total bigint;
+  v_lista jsonb;
+begin
+  if coalesce(array_length(v_admin_ids, 1), 0) = 0 then
+    raise exception 'sem_acesso' using errcode = '42501';
+  end if;
+
+  if p_sistema_slug is not null then
+    select s.id into v_sistema_id from public.sistemas s where s.slug = p_sistema_slug;
+
+    if v_sistema_id is null or not (v_sistema_id = any(v_admin_ids)) then
+      raise exception 'sem_acesso' using errcode = '42501';
+    end if;
+  end if;
+
+  if p_status is not null then
+    begin
+      v_status := p_status::public.status_interno;
+    exception when invalid_text_representation then
+      raise exception 'status_invalido' using errcode = '22023';
+    end;
+  end if;
+
+  if p_categoria is not null then
+    begin
+      v_categoria := p_categoria::public.categoria_sugestao;
+    exception when invalid_text_representation then
+      raise exception 'categoria_invalida' using errcode = '22023';
+    end;
+  end if;
+
+  if p_tipo is not null then
+    begin
+      v_tipo := p_tipo::public.tipo_sugestao;
+    exception when invalid_text_representation then
+      raise exception 'tipo_invalido' using errcode = '22023';
+    end;
+  end if;
+
+  if p_impacto is not null then
+    begin
+      v_impacto := p_impacto::public.impacto_nivel;
+    exception when invalid_text_representation then
+      raise exception 'impacto_invalido' using errcode = '22023';
+    end;
+  end if;
+
+  with escopo as (
+    select
+      su.*,
+      s.slug as sistema_slug,
+      pr.nome as autor_nome
+    from public.sugestoes su
+    join public.sistemas s on s.id = su.sistema_id
+    left join public.profiles pr on pr.id = su.autor_id
+    where su.sistema_id = any(v_admin_ids)
+      and (v_sistema_id is null or su.sistema_id = v_sistema_id)
+      and (v_status is null or su.status_interno = v_status)
+      and (v_categoria is null or su.categoria = v_categoria)
+      and (v_tipo is null or su.tipo = v_tipo)
+      and (v_impacto is null or su.impacto = v_impacto)
+      and (v_texto is null or su.titulo ilike ('%' || v_texto || '%'))
+  )
+  select count(*) into v_total from escopo;
+
+  with escopo as (
+    select
+      su.*,
+      s.slug as sistema_slug,
+      pr.nome as autor_nome
+    from public.sugestoes su
+    join public.sistemas s on s.id = su.sistema_id
+    left join public.profiles pr on pr.id = su.autor_id
+    where su.sistema_id = any(v_admin_ids)
+      and (v_sistema_id is null or su.sistema_id = v_sistema_id)
+      and (v_status is null or su.status_interno = v_status)
+      and (v_categoria is null or su.categoria = v_categoria)
+      and (v_tipo is null or su.tipo = v_tipo)
+      and (v_impacto is null or su.impacto = v_impacto)
+      and (v_texto is null or su.titulo ilike ('%' || v_texto || '%'))
+    order by su.criado_em desc
+    limit v_limit
+  )
+  select coalesce(jsonb_agg(row_to_json(t)), '[]'::jsonb)
+  into v_lista
+  from (
+    select
+      sistema_slug,
+      titulo,
+      descricao,
+      categoria,
+      status_interno,
+      tipo,
+      impacto,
+      esforco_tecnico,
+      votos_count,
+      comentarios_count,
+      autor_nome,
+      criado_em
+    from escopo
+  ) t;
+
+  return jsonb_build_object(
+    'filtros', jsonb_build_object(
+      'sistema_slug', p_sistema_slug,
+      'status', p_status,
+      'categoria', p_categoria,
+      'tipo', p_tipo,
+      'impacto', p_impacto,
+      'texto', v_texto,
+      'limit', v_limit
+    ),
+    'total', v_total,
+    'lista', v_lista
+  );
+end;
+$$;
+
+revoke all on function public.dexter_sugestoes_busca(text, text, text, text, text, text, text, int) from public, anon, authenticated;
+
+comment on function public.dexter_sugestoes_busca(text, text, text, text, text, text, text, int) is
+  'Dexter: busca filtrável de sugestões (sistema/status/categoria/tipo/impacto/texto no título), sem campos internos sensíveis, escopada aos sistemas em que o email é admin. Retorna total + lista. Gate: sem_acesso (42501) se sem admin em nenhum sistema, ou sistema fora do escopo; *_invalido (22023) se filtro de enum não reconhecido.';
+
+
+-- ---------------------------------------------------------------------
+-- 5) dexter_dimensoes(p_email, p_dimensao) -> jsonb
+--    Camada modular: valores distintos (facetas) para montar filtros
+--    dinâmicos no cliente do Dexter, apenas dentro dos dados dos
+--    sistemas em que o email é admin.
+--    p_dimensao in ('sistemas','status','categorias','tipos','impactos','autores').
+-- ---------------------------------------------------------------------
+create or replace function public.dexter_dimensoes(
+  p_email text,
+  p_dimensao text
+)
+returns jsonb
+language plpgsql
+security definer
+stable
+set search_path = ''
+as $$
+declare
+  v_admin_ids uuid[] := public.dexter_admin_sistema_ids(p_email);
+  v_dimensao text := lower(trim(coalesce(p_dimensao, '')));
+  v_result jsonb;
+begin
+  if coalesce(array_length(v_admin_ids, 1), 0) = 0 then
+    raise exception 'sem_acesso' using errcode = '42501';
+  end if;
+
+  if v_dimensao not in ('sistemas', 'status', 'categorias', 'tipos', 'impactos', 'autores') then
+    raise exception 'dimensao_invalida' using errcode = '22023';
+  end if;
+
+  if v_dimensao = 'sistemas' then
+    select coalesce(jsonb_agg(jsonb_build_object('sistema_slug', s.slug, 'sistema_nome', s.nome) order by s.slug), '[]'::jsonb)
+    into v_result
+    from public.sistemas s
+    where s.id = any(v_admin_ids);
+
+  elsif v_dimensao = 'status' then
+    select coalesce(jsonb_agg(jsonb_build_object('valor', x.status_interno, 'quantidade', x.qtd) order by x.qtd desc), '[]'::jsonb)
+    into v_result
+    from (
+      select su.status_interno, count(*) as qtd
+      from public.sugestoes su
+      where su.sistema_id = any(v_admin_ids)
+      group by su.status_interno
+    ) x;
+
+  elsif v_dimensao = 'categorias' then
+    select coalesce(jsonb_agg(jsonb_build_object('valor', x.categoria, 'quantidade', x.qtd) order by x.qtd desc), '[]'::jsonb)
+    into v_result
+    from (
+      select su.categoria, count(*) as qtd
+      from public.sugestoes su
+      where su.sistema_id = any(v_admin_ids)
+      group by su.categoria
+    ) x;
+
+  elsif v_dimensao = 'tipos' then
+    select coalesce(jsonb_agg(jsonb_build_object('valor', x.tipo, 'quantidade', x.qtd) order by x.qtd desc), '[]'::jsonb)
+    into v_result
+    from (
+      select su.tipo, count(*) as qtd
+      from public.sugestoes su
+      where su.sistema_id = any(v_admin_ids)
+        and su.tipo is not null
+      group by su.tipo
+    ) x;
+
+  elsif v_dimensao = 'impactos' then
+    select coalesce(jsonb_agg(jsonb_build_object('valor', x.impacto, 'quantidade', x.qtd) order by x.qtd desc), '[]'::jsonb)
+    into v_result
+    from (
+      select su.impacto, count(*) as qtd
+      from public.sugestoes su
+      where su.sistema_id = any(v_admin_ids)
+        and su.impacto is not null
+      group by su.impacto
+    ) x;
+
+  elsif v_dimensao = 'autores' then
+    select coalesce(jsonb_agg(jsonb_build_object('valor', x.autor_nome, 'quantidade', x.qtd) order by x.qtd desc), '[]'::jsonb)
+    into v_result
+    from (
+      select pr.nome as autor_nome, count(*) as qtd
+      from public.sugestoes su
+      join public.profiles pr on pr.id = su.autor_id
+      where su.sistema_id = any(v_admin_ids)
+        and pr.nome is not null
+      group by pr.nome
+    ) x;
+  end if;
+
+  return jsonb_build_object('dimensao', v_dimensao, 'valores', v_result);
+end;
+$$;
+
+revoke all on function public.dexter_dimensoes(text, text) from public, anon, authenticated;
+
+comment on function public.dexter_dimensoes(text, text) is
+  'Dexter: valores distintos (facetas: sistemas/status/categorias/tipos/impactos/autores) para montar filtros dinâmicos, calculados apenas dentro dos sistemas em que o email é admin. Gate: sem_acesso (42501) se sem admin em nenhum sistema; dimensao_invalida (22023) se p_dimensao não reconhecida.';

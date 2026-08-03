@@ -40,7 +40,7 @@ export function ModelSelector() {
         <Button
           variant="ghost"
           size="sm"
-          className="gap-1.5 text-muted-foreground"
+          className="gap-1.5 rounded-lg text-muted-foreground"
           disabled
           aria-label="Nenhum modelo online"
         >
@@ -69,7 +69,7 @@ export function ModelSelector() {
           <Button
             variant="ghost"
             size="sm"
-            className="gap-1.5 text-muted-foreground disabled:opacity-50"
+            className="gap-1.5 rounded-lg text-muted-foreground disabled:opacity-50"
             disabled={isLoading || models.length === 0}
             aria-label="Selecionar modelo de IA"
           >

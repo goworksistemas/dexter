@@ -57,6 +57,22 @@ const schema = z
 
     RATE_LIMIT_MAX: z.coerce.number().default(60),
     RATE_LIMIT_WINDOW: z.string().default("1 minute"),
+
+    // --- Loop agêntico (defaults seguros; opcional no Infisical) ---
+    /** Máx. de tool calls por resposta antes da síntese forçada. */
+    AGENT_MAX_STEPS: z.coerce.number().int().positive().default(20),
+    /** Máx. de rodadas modelo↔tools por resposta. */
+    AGENT_MAX_ROUNDS: z.coerce.number().int().positive().default(12),
+    /** Timeout total do run (ms). */
+    AGENT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(480_000),
+    /** Timeout por chamada ao modelo (ms). */
+    AGENT_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+    /** Truncamento de cada tool_result injetado no contexto (chars). */
+    AGENT_TOOL_RESULT_MAX_CHARS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(12_000),
   })
   .superRefine((val, ctx) => {
     if (val.LLM_PROVIDER === "anthropic" && !val.ANTHROPIC_API_KEY) {

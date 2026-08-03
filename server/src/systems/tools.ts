@@ -10,6 +10,7 @@
  */
 import { SYSTEM_TOOLS } from "./manifest.js"
 import { callSystemRpc } from "./client.js"
+import { SYSTEMS } from "./registry.js"
 import { canAccess, type SystemAccess } from "./access.js"
 
 export interface AnthropicTool {
@@ -54,6 +55,32 @@ export function buildTools(access: SystemAccess[]): AnthropicTool[] {
     }
   }
   return tools
+}
+
+export interface ToolDescription {
+  slug?: string
+  fn?: string
+  systemLabel?: string
+  toolLabel?: string
+  /** Frase pronta para a UI, ex.: "Consultando PipeGo · Consulta SQL". */
+  label: string
+}
+
+/** Traduz o nome técnico da tool em rótulos legíveis (para o progresso na UI). */
+export function describeTool(name: string): ToolDescription {
+  const parsed = parseToolName(name)
+  if (!parsed) return { label: name }
+  const { slug, fn } = parsed
+  const systemLabel = SYSTEMS.find((s) => s.slug === slug)?.label
+  const toolLabel = (SYSTEM_TOOLS[slug] ?? []).find((t) => t.fn === fn)?.label
+  const alvo = systemLabel ?? slug
+  return {
+    slug,
+    fn,
+    systemLabel,
+    toolLabel,
+    label: toolLabel ? `Consultando ${alvo} · ${toolLabel}` : `Consultando ${alvo}`,
+  }
 }
 
 export interface ToolExecution {

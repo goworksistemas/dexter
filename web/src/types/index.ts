@@ -17,6 +17,8 @@ export type ThemePreference = "light" | "dark" | "system"
 
 export interface UserPreferences {
   theme?: ThemePreference
+  /** Sidebar desktop em modo compacto (só ícones). */
+  sidebarCollapsed?: boolean
 }
 
 /** Perfil do usuário autenticado, derivado da sessão Supabase + profiles. */

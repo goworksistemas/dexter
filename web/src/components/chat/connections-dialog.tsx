@@ -28,7 +28,7 @@ function StatusDot({ status }: { status: ConnectionStatus }) {
     <span
       className={cn(
         "size-2 shrink-0 rounded-full",
-        status === "connected" && "bg-emerald-500",
+        status === "connected" && "status-dot-live bg-emerald-500",
         status === "no_access" && "bg-amber-500",
         status === "unavailable" && "bg-muted-foreground/40",
       )}
@@ -39,8 +39,10 @@ function StatusDot({ status }: { status: ConnectionStatus }) {
 
 function ConnectionRow({ item }: { item: ConnectionInfo }) {
   return (
-    <li className="flex items-start gap-3 rounded-md border border-border/80 px-3 py-2.5">
-      <Database className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+    <li className="flex items-start gap-3 rounded-lg border border-border/70 bg-card px-3 py-2.5 transition-colors hover:border-border">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+        <Database className="size-4" />
+      </span>
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-2">
           <p className="truncate text-sm font-medium text-foreground">
@@ -106,13 +108,14 @@ export function ConnectionsDialog() {
         <Button
           variant="ghost"
           size="sm"
-          className="gap-1.5 text-muted-foreground"
+          className="gap-1.5 rounded-lg text-muted-foreground"
           aria-label="Ver conexões com bancos de dados"
         >
           <Plug className="size-4" />
           <span className="hidden sm:inline">Conexões</span>
           {connectedCount > 0 ? (
-            <span className="rounded-full bg-emerald-500/15 px-1.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
+            <span className="flex items-center gap-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
+              <span className="status-dot-live size-1.5 rounded-full bg-emerald-500" aria-hidden />
               {connectedCount}
             </span>
           ) : null}
@@ -159,7 +162,7 @@ export function ConnectionsDialog() {
             Nenhum sistema configurado no AgentCore.
           </p>
         ) : (
-          <ul className="flex max-h-[50vh] flex-col gap-2 overflow-y-auto pr-1">
+          <ul className="flex max-h-[50dvh] flex-col gap-2 overflow-y-auto pr-1">
             {items.map((item) => (
               <ConnectionRow key={item.slug} item={item} />
             ))}

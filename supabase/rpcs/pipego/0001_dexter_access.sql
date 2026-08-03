@@ -613,3 +613,443 @@ end;
 $$;
 
 revoke all on function public.dexter_pipego_obras_resumo(text, text, boolean) from public, anon, authenticated;
+
+-- =============================================================================
+-- Parte 2 -- camada modular/filtravel (migration dexter_pipego_modular)
+--
+-- As RPCs acima (1-6) sao resumos fixos por pergunta. As RPCs abaixo (7-9)
+-- sao BUSCA com filtros livres (pessoa/cliente/status/data), pro Dexter
+-- compor a pergunta certa em vez de depender de um resumo pre-canned, mais
+-- uma RPC de DIMENSOES pro agente resolver nomes/ids antes de filtrar.
+--
+-- Descobertas de schema usadas aqui (inspecionadas antes de escrever):
+--  - omie_contas_receber.id_unico_cliente (ex.: "COS-6882118461") NAO bate
+--    com cliente_unico.documento. Quem faz essa ponte e' omie_clientes
+--    (id_unico = id_unico_cliente; tem documento e nome). Confirmado:
+--    189.729/189.729 titulos com match em omie_clientes.
+--  - jornadas.cliente_documento bate com cliente_unico.documento (raw
+--    CPF/CNPJ). 16.420/16.493 jornadas com match; o resto e' cliente nao
+--    cadastrado / documento divergente -- por isso o filtro por cliente em
+--    jornadas tambem aceita ilike direto em cliente_documento como fallback.
+--  - jornadas nao tem FK de responsavel: comercial_responsavel e' texto livre
+--    (as vezes sujo, ex. "Data de Assinatura do contrato: ..."). Filtro por
+--    responsavel e' ilike sobre esse texto mesmo.
+--  - jornada_status.id e' uuid; jornadas.status_id aponta pra ele. tipo_jornada
+--    e' string livre (enum de fato): arquitetura_comercial, cliente,
+--    contrato_comercial, downgrade, juridico_financeiro, manutencao, virtual.
+--  - omie_contas_receber.status_titulo in ('A VENCER','ATRASADO','CANCELADO',
+--    'RECEBIDO','VENCE HOJE'); origem in ('COR','GOO','COB','COS').
+--  - pendencias_pipeline.estagio in ('negociacao','primeiro-contato',
+--    'sem-contato'); responsavel_nome e' texto (ligado a responsavel_id uuid,
+--    mas aqui exposto so como nome pra manter simetria com os outros
+--    "responsaveis" que sao texto livre).
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- 7) dexter_contas_receber_busca(email, cliente, status, origem, data_ini,
+--    data_fim, limit) -- busca filtravel em omie_contas_receber, resolvendo
+--    o nome/documento do cliente via omie_clientes (id_unico = id_unico_cliente).
+--    Devolve total que casou com os filtros (nao so o cap) + agregados de
+--    valor do total filtrado + lista (cap 50). Gate: modulo 'financeiro'.
+-- -----------------------------------------------------------------------------
+create or replace function public.dexter_contas_receber_busca(
+  p_email text,
+  p_cliente text default null,
+  p_status text default null,
+  p_origem text default null,
+  p_data_ini date default null,
+  p_data_fim date default null,
+  p_limit int default 50
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_result jsonb;
+  v_limit int;
+begin
+  if not coalesce(public.dexter_pipego_pode(p_email, 'financeiro'), false) then
+    raise exception 'sem_acesso: % nao tem acesso a Financeiro/Contas a Receber no PipeGo', p_email
+      using errcode = '42501';
+  end if;
+
+  v_limit := least(greatest(coalesce(p_limit, 50), 1), 50);
+
+  with base as (
+    select
+      o.id_unico_titulo,
+      o.numero_documento,
+      o.numero_parcela,
+      o.id_unico_cliente,
+      oc.nome as cliente_nome,
+      oc.documento as cliente_documento,
+      o.origem,
+      o.status_titulo,
+      o.data_emissao,
+      o.data_vencimento,
+      o.data_recebimento,
+      o.valor_documento,
+      o.valor_pago,
+      o.valor_aberto,
+      o.observacao
+    from public.omie_contas_receber o
+    left join public.omie_clientes oc on oc.id_unico = o.id_unico_cliente
+    where (
+        p_cliente is null
+        or oc.nome ilike '%' || p_cliente || '%'
+        or oc.documento ilike '%' || p_cliente || '%'
+        or o.id_unico_cliente ilike '%' || p_cliente || '%'
+      )
+      and (p_status is null or o.status_titulo ilike p_status)
+      and (p_origem is null or o.origem ilike p_origem)
+      and (p_data_ini is null or o.data_vencimento >= p_data_ini)
+      and (p_data_fim is null or o.data_vencimento <= p_data_fim)
+  ),
+  lista as (
+    select *
+    from base
+    order by data_vencimento asc nulls last, valor_aberto desc nulls last
+    limit v_limit
+  )
+  select jsonb_build_object(
+    'filtros', jsonb_build_object(
+      'cliente', p_cliente,
+      'status', p_status,
+      'origem', p_origem,
+      'data_ini', p_data_ini,
+      'data_fim', p_data_fim
+    ),
+    'limit', v_limit,
+    'total_encontrado', (select count(*) from base),
+    'valor_documento_total', (select coalesce(sum(valor_documento), 0) from base),
+    'valor_pago_total', (select coalesce(sum(valor_pago), 0) from base),
+    'valor_aberto_total', (select coalesce(sum(valor_aberto), 0) from base),
+    'titulos', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id_unico_titulo', id_unico_titulo,
+        'numero_documento', numero_documento,
+        'numero_parcela', numero_parcela,
+        'id_unico_cliente', id_unico_cliente,
+        'cliente_nome', cliente_nome,
+        'cliente_documento', cliente_documento,
+        'origem', origem,
+        'status', status_titulo,
+        'data_emissao', data_emissao,
+        'data_vencimento', data_vencimento,
+        'data_recebimento', data_recebimento,
+        'valor_documento', valor_documento,
+        'valor_pago', valor_pago,
+        'valor_aberto', valor_aberto,
+        'observacao', observacao
+      ) order by data_vencimento asc nulls last)
+      from lista
+    ), '[]'::jsonb)
+  )
+  into v_result;
+
+  return v_result;
+end;
+$$;
+
+revoke all on function public.dexter_contas_receber_busca(text, text, text, text, date, date, int) from public, anon, authenticated;
+
+-- -----------------------------------------------------------------------------
+-- 8) dexter_jornadas_busca(email, cliente, responsavel, status, tipo, limit) --
+--    busca filtravel em jornadas (join jornada_status pro nome/cor do status,
+--    join cliente_unico pro nome do cliente via cliente_documento). Sempre
+--    exclui jornadas inativas (mesmo default do resumo). p_status aceita
+--    tanto o uuid de jornada_status.id quanto ilike no nome do status (use
+--    dexter_dimensoes('status_jornada') pra descobrir os dois). Gate: modulo
+--    'jornadas'.
+-- -----------------------------------------------------------------------------
+create or replace function public.dexter_jornadas_busca(
+  p_email text,
+  p_cliente text default null,
+  p_responsavel text default null,
+  p_status text default null,
+  p_tipo text default null,
+  p_limit int default 50
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_result jsonb;
+  v_limit int;
+begin
+  if not coalesce(public.dexter_pipego_pode(p_email, 'jornadas'), false) then
+    raise exception 'sem_acesso: % nao tem acesso a Jornadas no PipeGo', p_email
+      using errcode = '42501';
+  end if;
+
+  v_limit := least(greatest(coalesce(p_limit, 50), 1), 50);
+
+  with base as (
+    select
+      j.id,
+      j.codigo,
+      j.titulo,
+      j.cliente_documento,
+      c.nome as cliente_nome,
+      j.tipo_jornada,
+      js.id as status_id,
+      js.nome as status_nome,
+      js.cor as status_cor,
+      js.tipo as status_tipo,
+      j.comercial_responsavel,
+      j.contato_principal_nome,
+      j.contato_principal_email,
+      j.contato_principal_telefone,
+      j.prioridade,
+      j.data_checkin_previsto,
+      j.data_checkin_realizado,
+      j.created_at,
+      j.updated_at
+    from public.jornadas j
+    left join public.jornada_status js on js.id = j.status_id
+    left join public.cliente_unico c on c.documento = j.cliente_documento
+    where coalesce(j.inativo, false) = false
+      and (
+        p_cliente is null
+        or c.nome ilike '%' || p_cliente || '%'
+        or j.cliente_documento ilike '%' || p_cliente || '%'
+      )
+      and (
+        p_responsavel is null
+        or j.comercial_responsavel ilike '%' || p_responsavel || '%'
+      )
+      and (
+        p_status is null
+        or js.nome ilike p_status
+        or js.id::text = p_status
+      )
+      and (p_tipo is null or j.tipo_jornada ilike p_tipo)
+  ),
+  lista as (
+    select *
+    from base
+    order by updated_at desc nulls last, created_at desc nulls last
+    limit v_limit
+  )
+  select jsonb_build_object(
+    'filtros', jsonb_build_object(
+      'cliente', p_cliente,
+      'responsavel', p_responsavel,
+      'status', p_status,
+      'tipo', p_tipo
+    ),
+    'limit', v_limit,
+    'total_encontrado', (select count(*) from base),
+    'jornadas', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'id', id,
+        'codigo', codigo,
+        'titulo', titulo,
+        'cliente_documento', cliente_documento,
+        'cliente_nome', cliente_nome,
+        'tipo_jornada', tipo_jornada,
+        'status_id', status_id,
+        'status', status_nome,
+        'status_cor', status_cor,
+        'status_tipo', status_tipo,
+        'comercial_responsavel', comercial_responsavel,
+        'contato_principal_nome', contato_principal_nome,
+        'contato_principal_email', contato_principal_email,
+        'contato_principal_telefone', contato_principal_telefone,
+        'prioridade', prioridade,
+        'data_checkin_previsto', data_checkin_previsto,
+        'data_checkin_realizado', data_checkin_realizado,
+        'criado_em', created_at,
+        'atualizado_em', updated_at
+      ) order by updated_at desc nulls last, created_at desc nulls last)
+      from lista
+    ), '[]'::jsonb)
+  )
+  into v_result;
+
+  return v_result;
+end;
+$$;
+
+revoke all on function public.dexter_jornadas_busca(text, text, text, text, text, int) from public, anon, authenticated;
+
+-- -----------------------------------------------------------------------------
+-- 9) dexter_dimensoes(email, dimensao) -- vocabulario/entidades pro Dexter
+--    resolver antes de filtrar (ex.: descobrir o texto exato de um status, ou
+--    quais nomes de responsavel existem, antes de chamar as buscas acima).
+--    Gate: has_access (usuario existe e esta ativo no PipeGo -- nao exige
+--    permissao de modulo especifico, e' so metadado/vocabulario, nao dado de
+--    negocio).
+--
+--    p_dimensao aceito:
+--      'status_jornada'   -> jornada_status ativos (id uuid + nome + tipo +
+--                             tipo_jornada + cor + ordem)
+--      'tipos_jornada'     -> valores distintos de jornadas.tipo_jornada
+--      'origens'           -> valores distintos de omie_contas_receber.origem
+--      'status_conta'      -> valores distintos de omie_contas_receber.status_titulo
+--      'status_pendencia'  -> valores distintos de pendencias_pipeline.estagio
+--      'status_obra'       -> obras_status ativos (id uuid + nome + codigo)
+--      'responsaveis'      -> uniao de nomes livres usados como responsavel em
+--                             jornadas (comercial_responsavel), pendencias
+--                             (responsavel_nome) e obras (gestor_nome /
+--                             gestor_nome_2), cada um marcado com "fonte" pra
+--                             o agente saber de onde veio
+-- -----------------------------------------------------------------------------
+create or replace function public.dexter_dimensoes(
+  p_email text,
+  p_dimensao text
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_result jsonb;
+  v_ativo boolean;
+  v_existe boolean;
+  v_valores jsonb;
+begin
+  select coalesce(u.ativo, true), true
+    into v_ativo, v_existe
+  from public.usuarios u
+  where lower(u.email) = lower(p_email)
+  limit 1;
+
+  if not coalesce(v_existe, false) or not coalesce(v_ativo, false) then
+    raise exception 'sem_acesso: % nao tem acesso ao PipeGo (usuario inexistente ou inativo)', p_email
+      using errcode = '42501';
+  end if;
+
+  if p_dimensao = 'status_jornada' then
+    select coalesce(jsonb_agg(jsonb_build_object(
+        'id', js.id,
+        'nome', js.nome,
+        'tipo', js.tipo,
+        'tipo_jornada', js.tipo_jornada,
+        'cor', js.cor,
+        'ordem', js.ordem
+      ) order by js.tipo_jornada, js.ordem), '[]'::jsonb)
+      into v_valores
+    from public.jornada_status js
+    where coalesce(js.ativo, true);
+
+  elsif p_dimensao = 'tipos_jornada' then
+    select coalesce(jsonb_agg(jsonb_build_object(
+        'id', v.tipo_jornada,
+        'nome', v.tipo_jornada,
+        'qtd', v.qtd
+      ) order by v.tipo_jornada), '[]'::jsonb)
+      into v_valores
+    from (
+      select tipo_jornada, count(*) as qtd
+      from public.jornadas
+      where tipo_jornada is not null
+      group by tipo_jornada
+    ) v;
+
+  elsif p_dimensao = 'origens' then
+    select coalesce(jsonb_agg(jsonb_build_object(
+        'id', v.origem,
+        'nome', v.origem,
+        'qtd', v.qtd
+      ) order by v.origem), '[]'::jsonb)
+      into v_valores
+    from (
+      select origem, count(*) as qtd
+      from public.omie_contas_receber
+      where origem is not null
+      group by origem
+    ) v;
+
+  elsif p_dimensao = 'status_conta' then
+    select coalesce(jsonb_agg(jsonb_build_object(
+        'id', v.status_titulo,
+        'nome', v.status_titulo,
+        'qtd', v.qtd
+      ) order by v.status_titulo), '[]'::jsonb)
+      into v_valores
+    from (
+      select status_titulo, count(*) as qtd
+      from public.omie_contas_receber
+      where status_titulo is not null
+      group by status_titulo
+    ) v;
+
+  elsif p_dimensao = 'status_pendencia' then
+    select coalesce(jsonb_agg(jsonb_build_object(
+        'id', v.estagio,
+        'nome', v.estagio,
+        'qtd', v.qtd
+      ) order by v.estagio), '[]'::jsonb)
+      into v_valores
+    from (
+      select estagio, count(*) as qtd
+      from public.pendencias_pipeline
+      where estagio is not null
+      group by estagio
+    ) v;
+
+  elsif p_dimensao = 'status_obra' then
+    select coalesce(jsonb_agg(jsonb_build_object(
+        'id', os.id,
+        'nome', os.nome,
+        'codigo', os.codigo,
+        'ordem', os.ordem
+      ) order by os.ordem), '[]'::jsonb)
+      into v_valores
+    from public.obras_status os
+    where coalesce(os.ativo, true);
+
+  elsif p_dimensao = 'responsaveis' then
+    select coalesce(jsonb_agg(jsonb_build_object(
+        'id', v.nome,
+        'nome', v.nome,
+        'fonte', v.fonte,
+        'qtd', v.qtd
+      ) order by v.fonte, v.nome), '[]'::jsonb)
+      into v_valores
+    from (
+      select comercial_responsavel as nome, 'jornada'::text as fonte, count(*) as qtd
+      from public.jornadas
+      where comercial_responsavel is not null and coalesce(inativo, false) = false
+      group by comercial_responsavel
+      union all
+      select responsavel_nome as nome, 'pendencia'::text as fonte, count(*) as qtd
+      from public.pendencias_pipeline
+      where responsavel_nome is not null
+      group by responsavel_nome
+      union all
+      select gestor_nome as nome, 'obra'::text as fonte, count(*) as qtd
+      from public.obras
+      where gestor_nome is not null
+      group by gestor_nome
+      union all
+      select gestor_nome_2 as nome, 'obra'::text as fonte, count(*) as qtd
+      from public.obras
+      where gestor_nome_2 is not null
+      group by gestor_nome_2
+    ) v;
+
+  else
+    raise exception 'dimensao_invalida: % nao e uma dimensao suportada (use status_jornada, tipos_jornada, origens, status_conta, status_pendencia, status_obra ou responsaveis)', p_dimensao;
+  end if;
+
+  select jsonb_build_object(
+    'dimensao', p_dimensao,
+    'total_valores', jsonb_array_length(v_valores),
+    'valores', v_valores
+  ) into v_result;
+
+  return v_result;
+end;
+$$;
+
+revoke all on function public.dexter_dimensoes(text, text) from public, anon, authenticated;

@@ -12,6 +12,7 @@ import chatRoutes from "./routes/chat.js"
 import chatsRoutes from "./routes/chats.js"
 import connectionsRoutes from "./routes/connections.js"
 import modelsRoutes from "./routes/models.js"
+import projectsRoutes from "./routes/projects.js"
 import { AuthError, ForbiddenError, NotFoundError } from "./services/auth.js"
 
 declare module "fastify" {
@@ -65,6 +66,7 @@ app.get("/healthz", async () => ({ status: "ok" }))
 
 await app.register(chatRoutes)
 await app.register(chatsRoutes)
+await app.register(projectsRoutes)
 await app.register(connectionsRoutes)
 await app.register(modelsRoutes)
 

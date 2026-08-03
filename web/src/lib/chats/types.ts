@@ -7,6 +7,7 @@ import type { ChatRole } from "@/lib/agentcore/contract"
 export interface ChatSummary {
   id: string
   title: string | null
+  project_id: string | null
   updated_at: string
 }
 

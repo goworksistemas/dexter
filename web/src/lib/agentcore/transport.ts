@@ -12,6 +12,11 @@
  *   event: tool-result
  *   data: {"toolCallId":"abc123","result":{"nome":"..."}}
  *
+ *   event: progress
+ *   data: {"type":"tool_call_start","tool":"pipego__dexter_sql","step":1,...}
+ *   data: {"type":"tool_call_end","status":"ok","duration_ms":842,"rows":13,...}
+ *   data: {"type":"status","text":"Gerando resposta"}
+ *
  *   event: error
  *   data: {"message":"descrição do erro"}
  *
@@ -30,7 +35,12 @@
  *   `{type:"error"}` sintético — não precisam ser modelados como evento SSE.
  */
 import { getAccessToken } from "@/lib/supabase/auth";
-import type { ChatRequest, ChatStreamChunk, ChatTransport } from "./contract";
+import type {
+  AgentProgressEvent,
+  ChatRequest,
+  ChatStreamChunk,
+  ChatTransport,
+} from "./contract";
 
 interface AgentCoreTransportOptions {
   /** Base da API do AgentCore. Default: caminho relativo `/api`, que o Vite
@@ -119,11 +129,18 @@ function parseSseEvent(rawEvent: string): ChatStreamChunk | null {
   const dataLines: string[] = [];
 
   for (const line of rawEvent.split("\n")) {
+    // Comentários SSE (`: keepalive`) — heartbeat do AgentCore.
+    if (line.startsWith(":") || line.trim() === "") continue;
     if (line.startsWith("event:")) {
       eventName = line.slice("event:".length).trim();
     } else if (line.startsWith("data:")) {
       dataLines.push(line.slice("data:".length).trim());
     }
+  }
+
+  // Comentário SSE puro (`: keepalive`) — sinal de vida do AgentCore.
+  if (eventName === "message" && dataLines.length === 0) {
+    return rawEvent.trim().startsWith(":") ? { type: "heartbeat" } : null;
   }
 
   const rawData = dataLines.join("\n");
@@ -162,6 +179,10 @@ function toChunk(eventName: string, payload: unknown): ChatStreamChunk | null {
         toolCallId: String(data.toolCallId ?? ""),
         result: data.result,
       };
+    case "progress": {
+      const event = toProgressEvent(data);
+      return event ? { type: "progress", event } : null;
+    }
     case "error":
       return {
         type: "error",
@@ -169,6 +190,64 @@ function toChunk(eventName: string, payload: unknown): ChatStreamChunk | null {
       };
     case "done":
       return { type: "done" };
+    default:
+      return null;
+  }
+}
+
+function textoOpcional(valor: unknown): string | undefined {
+  return typeof valor === "string" && valor.length > 0 ? valor : undefined;
+}
+
+function numeroOpcional(valor: unknown): number | undefined {
+  return typeof valor === "number" && Number.isFinite(valor) ? valor : undefined;
+}
+
+/** Valida o payload de `event: progress`; descarta o que não reconhece. */
+function toProgressEvent(
+  data: Record<string, unknown>,
+): AgentProgressEvent | null {
+  switch (data.type) {
+    case "status": {
+      const text = textoOpcional(data.text);
+      if (!text) return null;
+      const step = numeroOpcional(data.step);
+      return { type: "status", text, ...(step !== undefined ? { step } : {}) };
+    }
+    case "thinking": {
+      const text = textoOpcional(data.text);
+      return text ? { type: "thinking", text } : null;
+    }
+    case "tool_call_start": {
+      const tool = textoOpcional(data.tool);
+      if (!tool) return null;
+      return {
+        type: "tool_call_start",
+        id: String(data.id ?? tool),
+        step: numeroOpcional(data.step) ?? 0,
+        tool,
+        system: textoOpcional(data.system),
+        system_label: textoOpcional(data.system_label),
+        tool_label: textoOpcional(data.tool_label),
+        label: textoOpcional(data.label) ?? tool,
+        args_summary: textoOpcional(data.args_summary),
+      };
+    }
+    case "tool_call_end": {
+      const tool = textoOpcional(data.tool);
+      if (!tool) return null;
+      const rows = numeroOpcional(data.rows);
+      return {
+        type: "tool_call_end",
+        id: String(data.id ?? tool),
+        step: numeroOpcional(data.step) ?? 0,
+        tool,
+        status: data.status === "error" ? "error" : "ok",
+        duration_ms: numeroOpcional(data.duration_ms) ?? 0,
+        ...(rows !== undefined ? { rows } : {}),
+        summary: textoOpcional(data.summary) ?? "",
+      };
+    }
     default:
       return null;
   }

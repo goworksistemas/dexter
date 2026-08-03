@@ -1,7 +1,8 @@
 /**
  * Cliente por sistema de negócio. Cada sistema tem seu próprio projeto Supabase;
  * conectamos com a service_role dele (do Infisical) e chamamos SÓ as RPCs
- * read-only com gate (dexter_whoami + dexter_*). Nunca SQL livre.
+ * read-only com gate (dexter_whoami + dexter_*). SQL do modelo só via
+ * dexter_sql (allowlist SELECT/WITH + role dexter_ro).
  */
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 

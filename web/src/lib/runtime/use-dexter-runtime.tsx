@@ -1,12 +1,9 @@
 /**
- * Adapta o `ChatTransport` (fronteira estável do AgentCore) ao runtime do
- * assistant-ui v0.15. Constrói um `ChatModelAdapter` cujo `run()` consome o
- * AsyncIterable do transporte e o traduz para os `ChatModelRunResult` que o
- * `useLocalRuntime` espera.
+ * Adapta o `ChatTransport` ao runtime do assistant-ui v0.15.
  *
- * Por padrão fala com o AgentCore real (`AgentCoreTransport`, SSE). O
- * `MockTransport` continua disponível como fallback opcional, atrás da flag
- * `VITE_USE_MOCK=true` (útil pra mexer na UI sem o backend rodando).
+ * A geração SSE vive no `chatRunsStore` (nível app): desmontar o ChatThread
+ * ou trocar de conversa só desanexa o watch do adapter — não aborta o fetch.
+ * Cancelamento explícito: `chatRunsStore.cancelRun(chatId)` (botão Parar).
  */
 import { useMemo, useRef } from "react"
 import { useLocalRuntime } from "@assistant-ui/react"
@@ -17,20 +14,24 @@ import type {
   ThreadMessage,
 } from "@assistant-ui/react"
 
-import { AgentCoreTransport } from "@/lib/agentcore"
-import type { ChatMessage, ChatTransport } from "@/lib/agentcore/contract"
+import type { ChatAttachment, ChatMessage, ChatTransport } from "@/lib/agentcore/contract"
+import { chatRunsStore } from "@/lib/chats/chat-runs-store"
 import { MockTransport } from "@/lib/runtime/mock-transport"
+import { AgentCoreTransport } from "@/lib/agentcore"
 
-/** Junta as partes de texto de uma ThreadMessage num único texto simples —
- * é isso que o ChatTransport espera em `ChatMessage.content`. */
+/** Ponte com os anexos pendentes do composer (ver `pending-attachments.ts`). */
+export interface PendingAttachmentsBridge {
+  attachmentsRef: { current: ChatAttachment[] }
+  clear: () => void
+  onSent?: (messageId: string, attachments: ChatAttachment[]) => void
+}
+
 function extrairTexto(message: ThreadMessage): string {
   return message.content
     .map((part) => (part.type === "text" ? part.text : ""))
     .join("")
 }
 
-/** Converte as ThreadMessage do assistant-ui para o formato simples do
- * contrato ChatTransport. */
 function paraChatMessages(messages: readonly ThreadMessage[]): ChatMessage[] {
   return messages.map((message) => ({
     id: message.id,
@@ -40,81 +41,151 @@ function paraChatMessages(messages: readonly ThreadMessage[]): ChatMessage[] {
   }))
 }
 
-/** Cria o ChatModelAdapter que faz a ponte entre o runtime do assistant-ui
- * e um ChatTransport concreto (mock ou AgentCore real).
- *
- * Recebe o threadId e o modelo selecionado como `refs` (não valores fixos)
- * porque ambos podem mudar sem que o runtime inteiro seja recriado — a
- * conversa ativa (nova conversa / troca na sidebar) e o modelo escolhido no
- * `ModelSelector` do header. Cada chamada de `run()` lê os valores mais
- * recentes em `threadIdRef.current` / `modelIdRef.current`. */
+function resultadoDeTexto(
+  texto: string,
+  status: ChatModelRunResult["status"],
+): ChatModelRunResult {
+  return {
+    content: [{ type: "text", text: texto }],
+    status,
+  }
+}
+
+/**
+ * Observa o snapshot do store e emite `ChatModelRunResult` até a geração
+ * assentar ou o `abortSignal` do runtime disparar (desanexar a UI — sem
+ * cancelar o store).
+ */
+async function* watchStoreRun(
+  chatId: string,
+  signal: AbortSignal,
+): AsyncGenerator<ChatModelRunResult, void, undefined> {
+  const queue: string[] = []
+  let wake: (() => void) | null = null
+
+  const enqueue = () => {
+    const run = chatRunsStore.getRun(chatId)
+    if (!run) return
+    queue.push(run.assistantText + "\0" + run.status + "\0" + (run.error ?? ""))
+    wake?.()
+  }
+
+  const unsub = chatRunsStore.subscribe(enqueue)
+  enqueue()
+
+  const onAbort = () => wake?.()
+  signal.addEventListener("abort", onAbort)
+
+  try {
+    let lastKey = ""
+    while (!signal.aborted) {
+      while (queue.length > 0) {
+        const key = queue.shift()!
+        if (key === lastKey) continue
+        lastKey = key
+        const run = chatRunsStore.getRun(chatId)
+        if (!run) return
+        const texto = run.assistantText
+        if (run.status === "running") {
+          yield resultadoDeTexto(texto, { type: "running" })
+        } else if (run.status === "error") {
+          yield resultadoDeTexto(texto, {
+            type: "incomplete",
+            reason: "error",
+            error: run.error ?? "erro",
+          })
+          return
+        } else if (run.status === "cancelled") {
+          yield resultadoDeTexto(texto, {
+            type: "incomplete",
+            reason: "cancelled",
+          })
+          return
+        } else {
+          yield resultadoDeTexto(texto, {
+            type: "complete",
+            reason: "stop",
+          })
+          return
+        }
+      }
+
+      if (signal.aborted) break
+
+      await new Promise<void>((resolve) => {
+        if (signal.aborted || queue.length > 0) {
+          resolve()
+          return
+        }
+        wake = resolve
+      })
+      wake = null
+    }
+
+    // UI desanexou: deixa o store continuar. Fecha o generator local como
+    // "running" truncado — o sync do ChatThread assume ao voltar.
+    const run = chatRunsStore.getRun(chatId)
+    if (run?.status === "running") {
+      yield resultadoDeTexto(run.assistantText, { type: "running" })
+    }
+  } finally {
+    signal.removeEventListener("abort", onAbort)
+    unsub()
+  }
+}
+
+export type ArtifactsContextBridge = () => Array<{
+  kind: string
+  title: string
+  content: string
+  version: number
+}>
+
 function criarChatModelAdapter(
-  transport: ChatTransport,
   threadIdRef: { current: string },
-  modelIdRef: { current: string | null }
+  modelIdRef: { current: string | null },
+  projectIdRef: { current: string | null },
+  pendingAttachmentsRef: { current: PendingAttachmentsBridge | null },
+  artifactsGetterRef: { current: ArtifactsContextBridge | null },
 ): ChatModelAdapter {
   return {
     async *run({ messages, abortSignal }) {
+      const chatId = threadIdRef.current
       const chatMessages = paraChatMessages(messages)
-      let texto = ""
 
-      const resultado = (): ChatModelRunResult => ({
-        content: [{ type: "text", text: texto }],
-        status: { type: "running" },
-      })
-
-      const modeloSelecionado = modelIdRef.current
-      const context = modeloSelecionado ? { model: modeloSelecionado } : undefined
-
-      try {
-        for await (const chunk of transport.stream(
-          { threadId: threadIdRef.current, messages: chatMessages, context },
-          abortSignal
-        )) {
-          if (chunk.type === "text-delta") {
-            texto += chunk.textDelta
-            yield resultado()
-          } else if (chunk.type === "error") {
-            // Torna o erro visível na própria bolha da resposta.
-            texto += `\n\n_Erro: ${chunk.message}_`
-            yield {
-              content: [{ type: "text", text: texto }],
-              status: { type: "incomplete", reason: "error", error: chunk.message },
-            }
-            return
-          } else if (chunk.type === "done") {
-            yield {
-              content: [{ type: "text", text: texto }],
-              status: { type: "complete", reason: "stop" },
-            }
-            return
+      const bridge = pendingAttachmentsRef.current
+      const anexosPendentes = bridge?.attachmentsRef.current ?? []
+      let attachments: ChatAttachment[] | undefined
+      if (anexosPendentes.length > 0) {
+        attachments = anexosPendentes
+        for (let i = chatMessages.length - 1; i >= 0; i--) {
+          if (chatMessages[i]!.role === "user") {
+            bridge?.onSent?.(chatMessages[i]!.id, anexosPendentes)
+            break
           }
-          // tool-call / tool-result: reservados para quando o AgentCore
-          // expuser tools reais; a UI de chat não precisa tratá-los agora.
         }
-
-        // O stream terminou sem emitir "done" nem "error" — normalmente
-        // porque foi abortado (botão "parar"). Fecha a mensagem como cancelada.
-        yield {
-          content: [{ type: "text", text: texto }],
-          status: { type: "incomplete", reason: "cancelled" },
-        }
-      } catch (err) {
-        if (abortSignal.aborted) {
-          yield {
-            content: [{ type: "text", text: texto }],
-            status: { type: "incomplete", reason: "cancelled" },
-          }
-          return
-        }
-        throw err
+        bridge?.clear()
       }
+
+      const artifacts = artifactsGetterRef.current?.() ?? []
+
+      const jaRodando = chatRunsStore.isRunning(chatId)
+      if (!jaRodando) {
+        chatRunsStore.startRun({
+          chatId,
+          messages: chatMessages,
+          model: modelIdRef.current,
+          projectId: projectIdRef.current,
+          attachments,
+          artifacts: artifacts.length > 0 ? artifacts : undefined,
+        })
+      }
+
+      yield* watchStoreRun(chatId, abortSignal)
     },
   }
 }
 
-/** Resolve o transporte a usar: AgentCore real por padrão, MockTransport só
- * quando `VITE_USE_MOCK=true` (dev sem backend). */
 function criarTransportPadrao(): ChatTransport {
   return import.meta.env.VITE_USE_MOCK === "true"
     ? new MockTransport()
@@ -122,46 +193,55 @@ function criarTransportPadrao(): ChatTransport {
 }
 
 /**
- * Hook que monta o AssistantRuntime a partir de um ChatTransport.
- *
- * `threadId` é o id da conversa ativa (UUID gerado pelo front — ver
- * `@/lib/chats`). Quando ele muda (nova conversa / troca de conversa), as
- * próximas mensagens enviadas já usam o novo id; quem decide limpar/injetar
- * histórico nas mensagens exibidas é o chamador (ver `ChatsProvider.newChat`
- * e `.selectChat`, que chamam `runtime.thread.reset(...)`).
- *
- * Se `threadId` não for informado, cai para um UUID novo gerado na hora
- * (uso avulso do hook, sem o provider de conversas).
- *
- * `selectedModelId` é o id do modelo escolhido no `ModelSelector` do header
- * (ver `@/lib/models`). Vai em `context.model` de cada `ChatRequest` — quando
- * `undefined`/`null` (backend de modelos fora do ar, ou catálogo vazio), o
- * request sai sem `context`, e o backend usa o default dele.
+ * Hook que monta o AssistantRuntime. A geração real fica no `chatRunsStore`;
+ * o adapter só anexa/desanexa a UI à geração do `threadId` ativo.
  */
 export function useDexterRuntime(
   threadId?: string,
   selectedModelId?: string | null,
-  transport?: ChatTransport
+  transport?: ChatTransport,
+  pendingAttachments?: PendingAttachmentsBridge,
+  projectId?: string | null,
+  getArtifacts?: ArtifactsContextBridge | null,
 ): AssistantRuntime {
   const transportRef = useRef<ChatTransport | null>(null)
   if (!transportRef.current) {
     transportRef.current = transport ?? criarTransportPadrao()
+    chatRunsStore.setTransport(transportRef.current)
   }
 
   const fallbackIdRef = useRef<string | null>(null)
   if (!fallbackIdRef.current) fallbackIdRef.current = crypto.randomUUID()
 
-  // "Latest ref": atualizado a cada render, lido só dentro de run() — não
-  // dispara re-render nem recria o adapter/runtime.
   const threadIdRef = useRef(threadId ?? fallbackIdRef.current)
   threadIdRef.current = threadId ?? fallbackIdRef.current
 
   const modelIdRef = useRef<string | null>(selectedModelId ?? null)
   modelIdRef.current = selectedModelId ?? null
 
+  const projectIdRef = useRef<string | null>(projectId ?? null)
+  projectIdRef.current = projectId ?? null
+
+  const pendingAttachmentsRef = useRef<PendingAttachmentsBridge | null>(
+    pendingAttachments ?? null,
+  )
+  pendingAttachmentsRef.current = pendingAttachments ?? null
+
+  const artifactsGetterRef = useRef<ArtifactsContextBridge | null>(
+    getArtifacts ?? null,
+  )
+  artifactsGetterRef.current = getArtifacts ?? null
+
   const adapter = useMemo(
-    () => criarChatModelAdapter(transportRef.current!, threadIdRef, modelIdRef),
-    []
+    () =>
+      criarChatModelAdapter(
+        threadIdRef,
+        modelIdRef,
+        projectIdRef,
+        pendingAttachmentsRef,
+        artifactsGetterRef,
+      ),
+    [],
   )
 
   return useLocalRuntime(adapter)

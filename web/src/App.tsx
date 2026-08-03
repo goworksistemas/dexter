@@ -1,23 +1,41 @@
-import { Navigate, Route, Routes } from "react-router-dom"
+import { Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom"
 
 import { AppShell } from "@/components/layout/app-shell"
 import { ChatThread } from "@/components/chat"
-import {
-  GuestRoute,
-  ProtectedRoute,
-} from "@/components/auth/protected-route"
+import { GuestRoute, ProtectedRoute } from "@/components/auth/protected-route"
 import { AuthCallbackPage } from "@/pages/auth/callback"
 import { ForgotPasswordPage } from "@/pages/auth/forgot-password"
 import { LoginPage } from "@/pages/auth/login"
 import { SignupPage } from "@/pages/auth/signup"
 import { UpdatePasswordPage } from "@/pages/auth/update-password"
+import { ArtifactsPage } from "@/pages/artifacts"
+import { ChatsPage } from "@/pages/chats"
+import { ProjectsPage } from "@/pages/projects"
+import { ProjectDetailPage } from "@/pages/projects/project-detail"
 import { SettingsPage } from "@/pages/settings"
 
+/** Rotas em que o ChatThread fica montado (não remonta entre elas). */
+function isChatRoute(pathname: string): boolean {
+  return (
+    pathname === "/" ||
+    pathname.startsWith("/c/") ||
+    /^\/p\/[^/]+(\/c\/[^/]+)?$/.test(pathname)
+  )
+}
+
 /**
- * Rotas do Dexter:
- * - públicas: login, signup, forgot/update password, callback PKCE
- * - protegidas: shell + chat (/ e /c/:chatId) + settings
+ * Shell autenticado: ChatThread permanece montado em todas as rotas de
+ * conversa (não remonta ao trocar `/` ↔ `/c/:id`). Nas páginas internas
+ * troca o conteúdo; a geração em background segue no ChatRunsStore.
  */
+function AuthenticatedShell() {
+  const { pathname } = useLocation()
+
+  return (
+    <AppShell>{isChatRoute(pathname) ? <ChatThread /> : <Outlet />}</AppShell>
+  )
+}
+
 function App() {
   return (
     <Routes>
@@ -31,30 +49,17 @@ function App() {
       <Route path="/auth/callback" element={<AuthCallbackPage />} />
 
       <Route element={<ProtectedRoute />}>
-        <Route
-          path="/"
-          element={
-            <AppShell>
-              <ChatThread />
-            </AppShell>
-          }
-        />
-        <Route
-          path="/c/:chatId"
-          element={
-            <AppShell>
-              <ChatThread />
-            </AppShell>
-          }
-        />
-        <Route
-          path="/settings"
-          element={
-            <AppShell>
-              <SettingsPage />
-            </AppShell>
-          }
-        />
+        <Route element={<AuthenticatedShell />}>
+          <Route index element={null} />
+          <Route path="c/:chatId" element={null} />
+          <Route path="p/:projectId" element={null} />
+          <Route path="p/:projectId/c/:chatId" element={null} />
+          <Route path="chats" element={<ChatsPage />} />
+          <Route path="projects" element={<ProjectsPage />} />
+          <Route path="projects/:projectId" element={<ProjectDetailPage />} />
+          <Route path="artifacts" element={<ArtifactsPage />} />
+          <Route path="settings" element={<SettingsPage />} />
+        </Route>
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

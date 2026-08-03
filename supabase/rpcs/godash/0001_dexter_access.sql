@@ -429,3 +429,300 @@ end;
 $$;
 
 revoke all on function public.dexter_notion_tasks_resumo(text, int) from public, anon, authenticated;
+
+-- =============================================================================
+-- Camada modular / filtravel -- adicionada para o dono poder perguntar
+-- "deals do vendedor X", "comissoes do owner Y", "tarefas do departamento Z"
+-- sem precisar de uma RPC fixa por pergunta. Mesma baseline de seguranca:
+-- SECURITY DEFINER, search_path vazio, tudo schema-qualificado, EXECUTE
+-- revogado de public/anon/authenticated.
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- 6) dexter_deals_busca(email, owner, estagio, pipeline, dias, limit)
+--    Busca filtravel em hs_funil_deals. p_owner faz ilike no nome do owner
+--    (join hubspot_owners). p_estagio faz ilike no label do estagio (ou
+--    deal_stage bruto quando o label nao existe). p_pipeline faz ilike no
+--    label do pipeline (ou pipeline_id bruto). Todos os filtros sao opcionais
+--    e combinaveis. p_limit e sempre capado em 50. Gate: relatorio
+--    'funil-hubspot'.
+-- -----------------------------------------------------------------------------
+create or replace function public.dexter_deals_busca(
+  p_email text,
+  p_owner text default null,
+  p_estagio text default null,
+  p_pipeline text default null,
+  p_dias int default 90,
+  p_limit int default 50
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_limit int := least(coalesce(p_limit, 50), 50);
+  v_result jsonb;
+begin
+  if not coalesce(public.dexter_godash_pode(p_email, 'funil-hubspot'), false) then
+    raise exception 'sem_acesso: % nao tem acesso ao Funil HubSpot no GoDash', p_email
+      using errcode = '42501';
+  end if;
+
+  with filtrado as (
+    select
+      d.hubspot_id,
+      d.deal_name,
+      d.amount,
+      d.currency,
+      d.pipeline_id,
+      pl.label as pipeline_label,
+      d.stage_id,
+      coalesce(st.label, d.deal_stage) as estagio_label,
+      d.owner_id,
+      trim(both ' ' from coalesce(ho.first_name, '') || ' ' || coalesce(ho.last_name, '')) as owner_nome,
+      ho.email as owner_email,
+      d.is_closed,
+      d.is_won,
+      d.close_date,
+      d.create_date
+    from public.hs_funil_deals d
+    left join public.hubspot_owners ho on ho.hubspot_id = d.owner_id
+    left join public.hubspot_pipelines pl on pl.hubspot_id = d.pipeline_id
+    left join public.hubspot_pipeline_stages st
+      on st.pipeline_id = d.pipeline_id and st.stage_id = d.stage_id
+    where not d.archived
+      and d.create_date >= now() - make_interval(days => p_dias)
+      and (
+        p_owner is null
+        or trim(both ' ' from coalesce(ho.first_name, '') || ' ' || coalesce(ho.last_name, '')) ilike '%' || p_owner || '%'
+      )
+      and (
+        p_estagio is null
+        or coalesce(st.label, d.deal_stage) ilike '%' || p_estagio || '%'
+      )
+      and (
+        p_pipeline is null
+        or coalesce(pl.label, d.pipeline_id) ilike '%' || p_pipeline || '%'
+      )
+  )
+  select jsonb_build_object(
+    'filtros', jsonb_build_object(
+      'owner', p_owner, 'estagio', p_estagio, 'pipeline', p_pipeline,
+      'dias', p_dias, 'limit', v_limit
+    ),
+    'total', (select count(*) from filtrado),
+    'valor_total', coalesce((select sum(f.amount) from filtrado f), 0),
+    'deals', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'deal_id', f.hubspot_id,
+        'nome', f.deal_name,
+        'valor', f.amount,
+        'moeda', f.currency,
+        'pipeline', f.pipeline_label,
+        'estagio', f.estagio_label,
+        'owner', f.owner_nome,
+        'owner_email', f.owner_email,
+        'fechado', f.is_closed,
+        'ganho', f.is_won,
+        'data_fechamento', f.close_date,
+        'data_criacao', f.create_date
+      ) order by f.create_date desc)
+      from (select * from filtrado order by create_date desc limit v_limit) f
+    ), '[]'::jsonb)
+  )
+  into v_result;
+
+  return v_result;
+end;
+$$;
+
+revoke all on function public.dexter_deals_busca(text, text, text, text, int, int) from public, anon, authenticated;
+
+-- -----------------------------------------------------------------------------
+-- 7) dexter_comissoes_busca(email, owner, status, dias, limit)
+--    Busca filtravel em hubspot_commissions_obj. p_owner ilike no nome do
+--    owner (join hubspot_owners). p_status ilike em payment_status. p_limit
+--    capado em 50. Gate: relatorio 'ranking' OU 'comissoes'.
+-- -----------------------------------------------------------------------------
+create or replace function public.dexter_comissoes_busca(
+  p_email text,
+  p_owner text default null,
+  p_status text default null,
+  p_dias int default 180,
+  p_limit int default 50
+)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_limit int := least(coalesce(p_limit, 50), 50);
+  v_result jsonb;
+begin
+  if not (
+    coalesce(public.dexter_godash_pode(p_email, 'ranking'), false)
+    or coalesce(public.dexter_godash_pode(p_email, 'comissoes'), false)
+  ) then
+    raise exception 'sem_acesso: % nao tem acesso a Ranking/Comissoes no GoDash', p_email
+      using errcode = '42501';
+  end if;
+
+  with filtrado as (
+    select
+      c.hubspot_id,
+      c.name,
+      c.deal_id,
+      c.owner_id,
+      trim(both ' ' from coalesce(ho.first_name, '') || ' ' || coalesce(ho.last_name, '')) as owner_nome,
+      ho.email as owner_email,
+      c.commission_amount,
+      c.commission_percentage,
+      c.commission_type,
+      c.payment_status,
+      c.payment_date,
+      c.created_at
+    from public.hubspot_commissions_obj c
+    left join public.hubspot_owners ho on ho.hubspot_id = c.owner_id
+    where not c.archived
+      and c.created_at >= now() - make_interval(days => p_dias)
+      and (
+        p_owner is null
+        or trim(both ' ' from coalesce(ho.first_name, '') || ' ' || coalesce(ho.last_name, '')) ilike '%' || p_owner || '%'
+      )
+      and (
+        p_status is null
+        or c.payment_status ilike '%' || p_status || '%'
+      )
+  )
+  select jsonb_build_object(
+    'filtros', jsonb_build_object(
+      'owner', p_owner, 'status', p_status, 'dias', p_dias, 'limit', v_limit
+    ),
+    'total', (select count(*) from filtrado),
+    'valor_total', coalesce((select sum(f.commission_amount) from filtrado f), 0),
+    'comissoes', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'comissao_id', f.hubspot_id,
+        'nome', f.name,
+        'deal_id', f.deal_id,
+        'owner', f.owner_nome,
+        'owner_email', f.owner_email,
+        'valor', f.commission_amount,
+        'percentual', f.commission_percentage,
+        'tipo', f.commission_type,
+        'status_pagamento', f.payment_status,
+        'data_pagamento', f.payment_date,
+        'criado_em', f.created_at
+      ) order by f.created_at desc)
+      from (select * from filtrado order by created_at desc limit v_limit) f
+    ), '[]'::jsonb)
+  )
+  into v_result;
+
+  return v_result;
+end;
+$$;
+
+revoke all on function public.dexter_comissoes_busca(text, text, text, int, int) from public, anon, authenticated;
+
+-- -----------------------------------------------------------------------------
+-- 8) dexter_dimensoes(email, dimensao) -- catalogo de valores distintos para
+--    montar filtros (owners, pipelines, estagios, status_comissao,
+--    departamentos). Nao expoe dado sensivel (so rotulos/contagens), por isso
+--    o gate e apenas has_access (profile ativo no GoDash), sem exigir acesso a
+--    um relatorio especifico.
+-- -----------------------------------------------------------------------------
+create or replace function public.dexter_dimensoes(p_email text, p_dimensao text)
+returns jsonb
+language plpgsql
+stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_has_access boolean;
+  v_result jsonb;
+begin
+  select coalesce(bool_or(pr.active), false)
+  into v_has_access
+  from public.profiles pr
+  where lower(pr.email) = lower(p_email);
+
+  if not coalesce(v_has_access, false) then
+    raise exception 'sem_acesso: % nao tem acesso ao GoDash', p_email
+      using errcode = '42501';
+  end if;
+
+  case lower(coalesce(p_dimensao, ''))
+    when 'owners' then
+      select coalesce(jsonb_agg(jsonb_build_object(
+        'owner_id', ho.hubspot_id,
+        'nome', trim(both ' ' from coalesce(ho.first_name, '') || ' ' || coalesce(ho.last_name, '')),
+        'email', ho.email
+      ) order by ho.first_name, ho.last_name), '[]'::jsonb)
+      into v_result
+      from public.hubspot_owners ho
+      where not ho.archived;
+
+    when 'pipelines' then
+      select coalesce(jsonb_agg(jsonb_build_object(
+        'pipeline_id', pl.hubspot_id,
+        'label', pl.label
+      ) order by pl.display_order), '[]'::jsonb)
+      into v_result
+      from public.hubspot_pipelines pl
+      where not pl.archived;
+
+    when 'estagios' then
+      select coalesce(jsonb_agg(jsonb_build_object(
+        'pipeline_id', st.pipeline_id,
+        'pipeline_label', pl.label,
+        'stage_id', st.stage_id,
+        'label', st.label,
+        'is_closed', st.is_closed,
+        'is_won', st.is_won
+      ) order by pl.label, st.display_order), '[]'::jsonb)
+      into v_result
+      from public.hubspot_pipeline_stages st
+      left join public.hubspot_pipelines pl on pl.hubspot_id = st.pipeline_id
+      where not st.archived;
+
+    when 'status_comissao' then
+      select coalesce(jsonb_agg(jsonb_build_object(
+        'status', x.payment_status,
+        'qtd', x.n
+      ) order by x.n desc), '[]'::jsonb)
+      into v_result
+      from (
+        select payment_status, count(*) as n
+        from public.hubspot_commissions_obj
+        where not archived
+        group by payment_status
+      ) x;
+
+    when 'departamentos' then
+      select coalesce(jsonb_agg(jsonb_build_object(
+        'departamento', x.department,
+        'qtd', x.n
+      ) order by x.n desc), '[]'::jsonb)
+      into v_result
+      from (
+        select department, count(*) as n
+        from public.notion_tasks
+        group by department
+      ) x;
+
+    else
+      raise exception 'dimensao_invalida: % nao e uma dimensao suportada (owners, pipelines, estagios, status_comissao, departamentos)', p_dimensao
+        using errcode = '22023';
+  end case;
+
+  return jsonb_build_object('dimensao', lower(p_dimensao), 'valores', v_result);
+end;
+$$;
+
+revoke all on function public.dexter_dimensoes(text, text) from public, anon, authenticated;

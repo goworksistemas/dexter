@@ -5,6 +5,7 @@
  * Supabase, quando configurado).
  */
 import { getAccessToken } from "@/lib/supabase/auth"
+import type { AgentStepWire } from "@/lib/agentcore/contract"
 import type { ChatMessageRecord, ChatSummary } from "./types"
 
 const BASE_URL = "/api"
@@ -55,6 +56,32 @@ export async function fetchChatMessages(
   return response.json()
 }
 
+export interface ChatStepsRecord {
+  /** id da mensagem do assistente que originou os passos. */
+  messageId: string
+  steps: AgentStepWire[]
+}
+
+/**
+ * Passos (tool calls) já executados na conversa, agrupados por resposta
+ * (`GET /api/chats/:id/steps`). Alimenta o "Ver detalhes" do histórico.
+ */
+export async function fetchChatSteps(
+  chatId: string,
+  signal?: AbortSignal,
+): Promise<ChatStepsRecord[]> {
+  const response = await fetch(`${BASE_URL}/chats/${chatId}/steps`, {
+    headers: await authHeaders(),
+    signal,
+  })
+  if (!response.ok) {
+    throw new Error(
+      `GET /api/chats/${chatId}/steps respondeu ${response.status} ${response.statusText}`,
+    )
+  }
+  return response.json()
+}
+
 /** Renomeia uma conversa (`PATCH /api/chats/:id`). */
 export async function renameChat(
   chatId: string,
@@ -76,6 +103,27 @@ export async function renameChat(
   return response.json()
 }
 
+/** Move conversa para um projeto (`projectId` null = sem projeto). */
+export async function moveChatToProject(
+  chatId: string,
+  projectId: string | null,
+): Promise<ChatSummary> {
+  const response = await fetch(`${BASE_URL}/chats/${chatId}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await authHeaders()),
+    },
+    body: JSON.stringify({ projectId }),
+  })
+  if (!response.ok) {
+    if (response.status === 404) throw new Error("Conversa não encontrada.")
+    if (response.status === 403) throw new Error("Sem permissão para esta conversa.")
+    throw new Error(`PATCH /api/chats/${chatId} respondeu ${response.status}`)
+  }
+  return response.json()
+}
+
 /** Exclui uma conversa (`DELETE /api/chats/:id`). */
 export async function deleteChat(chatId: string): Promise<void> {
   const response = await fetch(`${BASE_URL}/chats/${chatId}`, {
@@ -86,5 +134,30 @@ export async function deleteChat(chatId: string): Promise<void> {
     if (response.status === 404) throw new Error("Conversa não encontrada.")
     if (response.status === 403) throw new Error("Sem permissão para esta conversa.")
     throw new Error(`DELETE /api/chats/${chatId} respondeu ${response.status}`)
+  }
+}
+
+/**
+ * Mantém as primeiras `keepCount` mensagens da conversa e apaga o restante
+ * (`POST /api/chats/:id/truncate`). Usado por editar / tentar novamente.
+ */
+export async function truncateChatMessages(
+  chatId: string,
+  keepCount: number,
+): Promise<void> {
+  const response = await fetch(`${BASE_URL}/chats/${chatId}/truncate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await authHeaders()),
+    },
+    body: JSON.stringify({ keepCount }),
+  })
+  if (!response.ok) {
+    if (response.status === 404) throw new Error("Conversa não encontrada.")
+    if (response.status === 403) throw new Error("Sem permissão para esta conversa.")
+    throw new Error(
+      `POST /api/chats/${chatId}/truncate respondeu ${response.status}`,
+    )
   }
 }

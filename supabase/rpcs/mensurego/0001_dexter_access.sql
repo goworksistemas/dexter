@@ -374,3 +374,325 @@ REVOKE ALL ON FUNCTION public.dexter_rh_onboarding_offboarding(text) FROM PUBLIC
 
 COMMENT ON FUNCTION public.dexter_rh_onboarding_offboarding(text) IS
   'Dexter [gate RH/DP]: cartões do kanban de onboarding/offboarding agregados por etapa (rh_etapas), com contagem de atrasados (data_prevista < hoje). Não expõe nome do colaborador do cartão.';
+
+
+-- =============================================================================
+-- Camada modular (migration dexter_mensurego_modular)
+--
+-- As RPCs abaixo tornam a camada de acesso do Dexter filtrável por
+-- departamento/unidade/status/período, mantendo o padrão conservador:
+--   - dexter_rh_colaboradores_busca: contagens (ativos/inativos/gestores)
+--     filtráveis por departamento/status/tipo_vaga. A "amostra_colaboradores"
+--     retornada é capada em 50 linhas e traz apenas nome + cargo + departamento
+--     (sem CPF, telefone, e-mail, matrícula ou salário).
+--   - dexter_medicoes_busca: consumo de água/energia por unidade, filtrável
+--     por unidade/tipo e por janela de meses (p_meses).
+--   - dexter_dimensoes: valores distintos (departamentos/unidades/etapas/
+--     status/tipo_vaga/tipo_medicao) para o agente resolver filtros antes de
+--     chamar as RPCs de negócio.
+-- Todas usam o mesmo gate dexter_has_rh_dp_access(p_email).
+-- =============================================================================
+
+
+-- -----------------------------------------------------------------------------
+-- 7. dexter_rh_colaboradores_busca(p_email, p_departamento, p_status,
+--    p_tipo_vaga) -- contagens filtráveis de colaboradores. Nunca expõe CPF,
+--    telefone, e-mail, matrícula ou salário. Lista (quando incluída) é capada
+--    em 50 linhas com nome + cargo + departamento.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.dexter_rh_colaboradores_busca(
+  p_email text,
+  p_departamento text DEFAULT NULL,
+  p_status text DEFAULT NULL,
+  p_tipo_vaga text DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_status_norm text;
+BEGIN
+  IF NOT public.dexter_has_rh_dp_access(p_email) THEN
+    RAISE EXCEPTION 'sem_acesso' USING ERRCODE = '42501';
+  END IF;
+
+  -- normaliza p_status: aceita ativo/ativos/true ou inativo/inativos/false;
+  -- qualquer outro valor é tratado como "sem filtro de status".
+  v_status_norm := CASE
+    WHEN p_status IS NULL THEN NULL
+    WHEN lower(p_status) IN ('ativo', 'ativos', 'true') THEN 'ativo'
+    WHEN lower(p_status) IN ('inativo', 'inativos', 'false') THEN 'inativo'
+    ELSE NULL
+  END;
+
+  RETURN jsonb_build_object(
+    'filtros', jsonb_build_object(
+      'departamento', p_departamento,
+      'status', v_status_norm,
+      'tipo_vaga', p_tipo_vaga
+    ),
+    'totais', (
+      SELECT jsonb_build_object(
+        'total', count(*),
+        'ativos', count(*) FILTER (WHERE c.ativo),
+        'inativos', count(*) FILTER (WHERE NOT c.ativo),
+        'gestores', count(*) FILTER (WHERE c.ativo AND c.eh_gestor)
+      )
+      FROM public.rh_colaboradores c
+      LEFT JOIN public.rh_departamentos d ON d.id = c.departamento_id
+      WHERE (p_departamento IS NULL OR d.nome ILIKE '%' || p_departamento || '%')
+        AND (v_status_norm IS NULL OR (v_status_norm = 'ativo') = c.ativo)
+        AND (p_tipo_vaga IS NULL OR lower(c.tipo_vaga::text) = lower(p_tipo_vaga))
+    ),
+    'por_departamento', (
+      SELECT coalesce(jsonb_agg(t ORDER BY t.departamento), '[]'::jsonb)
+      FROM (
+        SELECT
+          coalesce(d.nome, 'sem_departamento') AS departamento,
+          count(c.id) AS total,
+          count(c.id) FILTER (WHERE c.ativo) AS ativos,
+          count(c.id) FILTER (WHERE NOT c.ativo) AS inativos,
+          count(c.id) FILTER (WHERE c.ativo AND c.eh_gestor) AS gestores
+        FROM public.rh_colaboradores c
+        LEFT JOIN public.rh_departamentos d ON d.id = c.departamento_id
+        WHERE (p_departamento IS NULL OR d.nome ILIKE '%' || p_departamento || '%')
+          AND (v_status_norm IS NULL OR (v_status_norm = 'ativo') = c.ativo)
+          AND (p_tipo_vaga IS NULL OR lower(c.tipo_vaga::text) = lower(p_tipo_vaga))
+        GROUP BY coalesce(d.nome, 'sem_departamento')
+      ) t
+    ),
+    'amostra_colaboradores', (
+      SELECT coalesce(jsonb_agg(t2), '[]'::jsonb)
+      FROM (
+        SELECT
+          c.nome,
+          c.cargo,
+          coalesce(d.nome, 'sem_departamento') AS departamento
+        FROM public.rh_colaboradores c
+        LEFT JOIN public.rh_departamentos d ON d.id = c.departamento_id
+        WHERE (p_departamento IS NULL OR d.nome ILIKE '%' || p_departamento || '%')
+          AND (v_status_norm IS NULL OR (v_status_norm = 'ativo') = c.ativo)
+          AND (p_tipo_vaga IS NULL OR lower(c.tipo_vaga::text) = lower(p_tipo_vaga))
+        ORDER BY c.nome
+        LIMIT 50
+      ) t2
+    ),
+    'amostra_capada_em', 50,
+    'gerado_em', now()
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.dexter_rh_colaboradores_busca(text, text, text, text) FROM PUBLIC, anon, authenticated;
+
+COMMENT ON FUNCTION public.dexter_rh_colaboradores_busca(text, text, text, text) IS
+  'Dexter [gate RH/DP]: contagens de colaboradores (total/ativos/inativos/gestores), no total e por departamento, filtráveis por p_departamento (ILIKE parcial), p_status (ativo/inativo) e p_tipo_vaga (demais/obras). Inclui amostra_colaboradores capada em 50 linhas com apenas nome+cargo+departamento — nunca CPF, telefone, e-mail, matrícula ou salário.';
+
+
+-- -----------------------------------------------------------------------------
+-- 8. dexter_medicoes_busca(p_email, p_unidade, p_tipo, p_meses) -- consumo de
+--    água/energia por unidade, filtrável por unidade/tipo e por janela de
+--    meses (default 6, capado em 36).
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.dexter_medicoes_busca(
+  p_email text,
+  p_unidade text DEFAULT NULL,
+  p_tipo text DEFAULT NULL,
+  p_meses integer DEFAULT 6
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_meses integer;
+  v_desde timestamptz;
+  v_tipo_norm text;
+BEGIN
+  IF NOT public.dexter_has_rh_dp_access(p_email) THEN
+    RAISE EXCEPTION 'sem_acesso' USING ERRCODE = '42501';
+  END IF;
+
+  v_meses := greatest(1, least(coalesce(p_meses, 6), 36));
+  v_desde := now() - make_interval(months => v_meses);
+
+  v_tipo_norm := CASE
+    WHEN p_tipo IS NULL THEN NULL
+    WHEN lower(p_tipo) IN ('agua', 'água') THEN 'agua'
+    WHEN lower(p_tipo) IN ('energia', 'eletrica', 'elétrica') THEN 'energia'
+    ELSE NULL
+  END;
+
+  RETURN (
+    WITH energia_janela AS (
+      SELECT me.medidor_id, me.leitura, me.data_hora
+      FROM public.med_energia me
+      WHERE me.data_hora >= v_desde
+    ),
+    energia_agg AS (
+      SELECT
+        medidor_id,
+        count(*) AS leituras,
+        min(leitura) AS leitura_min,
+        max(leitura) AS leitura_max,
+        min(data_hora) AS primeira_leitura_em,
+        max(data_hora) AS ultima_leitura_em
+      FROM energia_janela
+      GROUP BY medidor_id
+    ),
+    hidro_janela AS (
+      SELECT mh.medidor_id, mh.leitura, mh.data_hora
+      FROM public.med_hidrometros mh
+      WHERE mh.data_hora >= v_desde
+    ),
+    hidro_agg AS (
+      SELECT
+        medidor_id,
+        count(*) AS leituras,
+        min(leitura) AS leitura_min,
+        max(leitura) AS leitura_max,
+        min(data_hora) AS primeira_leitura_em,
+        max(data_hora) AS ultima_leitura_em
+      FROM hidro_janela
+      GROUP BY medidor_id
+    ),
+    por_unidade AS (
+      SELECT
+        u.id AS unidade_id,
+        u.nome AS unidade,
+        'energia'::text AS tipo,
+        count(mm.id) AS medidores_considerados,
+        coalesce(sum(greatest(ea.leitura_max - ea.leitura_min, 0)), 0) AS consumo_periodo,
+        min(ea.primeira_leitura_em) AS primeira_leitura_em,
+        max(ea.ultima_leitura_em) AS ultima_leitura_em
+      FROM public.med_medidores mm
+      JOIN public.med_unidades u ON u.id = mm.unidade_id
+      LEFT JOIN energia_agg ea ON ea.medidor_id = mm.id
+      WHERE mm.ativo = true
+        AND mm.tipo = 'energia'
+        AND (v_tipo_norm IS NULL OR v_tipo_norm = 'energia')
+        AND (p_unidade IS NULL OR u.nome ILIKE '%' || p_unidade || '%')
+      GROUP BY u.id, u.nome
+
+      UNION ALL
+
+      SELECT
+        u.id AS unidade_id,
+        u.nome AS unidade,
+        'agua'::text AS tipo,
+        count(mm.id) AS medidores_considerados,
+        coalesce(sum(greatest(ha.leitura_max - ha.leitura_min, 0)), 0) AS consumo_periodo,
+        min(ha.primeira_leitura_em) AS primeira_leitura_em,
+        max(ha.ultima_leitura_em) AS ultima_leitura_em
+      FROM public.med_medidores mm
+      JOIN public.med_unidades u ON u.id = mm.unidade_id
+      LEFT JOIN hidro_agg ha ON ha.medidor_id = mm.id
+      WHERE mm.ativo = true
+        AND mm.tipo = 'agua'
+        AND (v_tipo_norm IS NULL OR v_tipo_norm = 'agua')
+        AND (p_unidade IS NULL OR u.nome ILIKE '%' || p_unidade || '%')
+      GROUP BY u.id, u.nome
+    )
+    SELECT jsonb_build_object(
+      'filtros', jsonb_build_object('unidade', p_unidade, 'tipo', v_tipo_norm, 'meses', v_meses),
+      'por_unidade', coalesce(jsonb_agg(por_unidade ORDER BY por_unidade.unidade, por_unidade.tipo), '[]'::jsonb),
+      'gerado_em', now()
+    )
+    FROM por_unidade
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.dexter_medicoes_busca(text, text, text, integer) FROM PUBLIC, anon, authenticated;
+
+COMMENT ON FUNCTION public.dexter_medicoes_busca(text, text, text, integer) IS
+  'Dexter [gate RH/DP]: consumo de água/energia por unidade dentro da janela de p_meses (default 6, capado em 36), filtrável por p_unidade (ILIKE parcial) e p_tipo (agua/energia). consumo_periodo é a diferença entre a maior e a menor leitura acumulada do medidor dentro da janela.';
+
+
+-- -----------------------------------------------------------------------------
+-- 9. dexter_dimensoes(p_email, p_dimensao) -- valores distintos para o agente
+--    resolver filtros antes de chamar as RPCs de negócio. Dimensões aceitas:
+--    departamentos, unidades, etapas, status_colaborador, tipos_vaga,
+--    tipos_medicao.
+-- -----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.dexter_dimensoes(p_email text, p_dimensao text)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_dim text := lower(coalesce(p_dimensao, ''));
+BEGIN
+  IF NOT public.dexter_has_rh_dp_access(p_email) THEN
+    RAISE EXCEPTION 'sem_acesso' USING ERRCODE = '42501';
+  END IF;
+
+  IF v_dim = 'departamentos' THEN
+    RETURN jsonb_build_object(
+      'dimensao', 'departamentos',
+      'valores', (
+        SELECT coalesce(jsonb_agg(jsonb_build_object('id', d.id, 'nome', d.nome, 'eh_obras', d.eh_obras) ORDER BY d.nome), '[]'::jsonb)
+        FROM public.rh_departamentos d
+        WHERE d.ativo = true
+      )
+    );
+
+  ELSIF v_dim = 'unidades' THEN
+    RETURN jsonb_build_object(
+      'dimensao', 'unidades',
+      'valores', (
+        SELECT coalesce(jsonb_agg(jsonb_build_object('id', u.id, 'nome', u.nome) ORDER BY u.nome), '[]'::jsonb)
+        FROM public.med_unidades u
+        WHERE u.ativo = true
+      )
+    );
+
+  ELSIF v_dim = 'etapas' THEN
+    RETURN jsonb_build_object(
+      'dimensao', 'etapas',
+      'valores', (
+        SELECT coalesce(jsonb_agg(jsonb_build_object('id', e.id, 'nome', e.nome, 'tipo', e.tipo, 'ordem', e.ordem) ORDER BY e.ordem), '[]'::jsonb)
+        FROM public.rh_etapas e
+        WHERE e.ativo = true
+      )
+    );
+
+  ELSIF v_dim = 'status_colaborador' THEN
+    RETURN jsonb_build_object(
+      'dimensao', 'status_colaborador',
+      'valores', '["ativo", "inativo"]'::jsonb
+    );
+
+  ELSIF v_dim = 'tipos_vaga' THEN
+    RETURN jsonb_build_object(
+      'dimensao', 'tipos_vaga',
+      'valores', (
+        SELECT coalesce(jsonb_agg(e ORDER BY e), '[]'::jsonb)
+        FROM unnest(enum_range(NULL::public.rh_tipo_vaga)) AS e(e)
+      )
+    );
+
+  ELSIF v_dim = 'tipos_medicao' THEN
+    RETURN jsonb_build_object(
+      'dimensao', 'tipos_medicao',
+      'valores', '["agua", "energia"]'::jsonb
+    );
+
+  ELSE
+    RAISE EXCEPTION 'dimensao_invalida: % (valores aceitos: departamentos, unidades, etapas, status_colaborador, tipos_vaga, tipos_medicao)', p_dimensao
+      USING ERRCODE = '22023';
+  END IF;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.dexter_dimensoes(text, text) FROM PUBLIC, anon, authenticated;
+
+COMMENT ON FUNCTION public.dexter_dimensoes(text, text) IS
+  'Dexter [gate RH/DP]: valores distintos de uma dimensão (departamentos/unidades/etapas/status_colaborador/tipos_vaga/tipos_medicao) para o agente resolver filtros antes de chamar dexter_rh_colaboradores_busca/dexter_medicoes_busca. p_dimensao inválida lança exceção 22023.';

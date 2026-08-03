@@ -272,3 +272,204 @@ REVOKE ALL ON FUNCTION public.dexter_localizacoes_status(text, text) FROM PUBLIC
 
 COMMENT ON FUNCTION public.dexter_localizacoes_status(text, text) IS
   'Dexter: per-location ticket load (open/total ocorrencias counts, last ticket date), optionally filtered by predio, capped at 50 rows ordered by open count. Gated by email via _dexter_assert_access.';
+
+-- ---------------------------------------------------------------------------
+-- 5) dexter_ocorrencias_busca(p_email, p_predio, p_tipo_problema, p_status,
+--    p_localizacao, p_data_ini, p_data_fim, p_limit) -> jsonb
+--    Flexible/modular ocorrencias search. Superset of dexter_ocorrencias_lista:
+--    adds tipo_problema, free-text localizacao (identificador_extra/andar/
+--    ambiente nome) and criado_em date range filters, plus a total_encontrado
+--    count (unbounded by the row cap) so Dexter can tell "matched N, showing
+--    top 50" instead of silently truncating.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.dexter_ocorrencias_busca(
+  p_email text,
+  p_predio text DEFAULT NULL,
+  p_tipo_problema text DEFAULT NULL,
+  p_status text DEFAULT NULL,
+  p_localizacao text DEFAULT NULL,
+  p_data_ini date DEFAULT NULL,
+  p_data_fim date DEFAULT NULL,
+  p_limit integer DEFAULT 50
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_limit integer := GREATEST(1, LEAST(COALESCE(p_limit, 50), 50));
+  v_total integer;
+  v_itens jsonb;
+BEGIN
+  PERFORM public._dexter_assert_access(p_email);
+
+  SELECT COUNT(*) INTO v_total
+  FROM public.ocorrencias o
+  JOIN public.localizacoes l ON l.id = o.id_localizacao
+  LEFT JOIN public.ambientes a ON a.id = l.id_ambiente
+  WHERE (p_predio IS NULL OR l.predio ILIKE '%' || p_predio || '%')
+    AND (p_tipo_problema IS NULL OR o.tipo_problema ILIKE '%' || p_tipo_problema || '%')
+    AND (p_status IS NULL OR lower(o.status) = lower(p_status))
+    AND (
+      p_localizacao IS NULL
+      OR l.identificador_extra ILIKE '%' || p_localizacao || '%'
+      OR l.andar ILIKE '%' || p_localizacao || '%'
+      OR a.nome ILIKE '%' || p_localizacao || '%'
+    )
+    AND (p_data_ini IS NULL OR o.criado_em >= p_data_ini::timestamptz)
+    AND (p_data_fim IS NULL OR o.criado_em < (p_data_fim + 1)::timestamptz);
+
+  SELECT COALESCE(jsonb_agg(row_to_json(x)), '[]'::jsonb) INTO v_itens
+  FROM (
+    SELECT
+      o.id,
+      l.predio,
+      l.andar,
+      l.identificador_extra,
+      a.nome AS ambiente,
+      a.categoria AS ambiente_categoria,
+      o.tipo_problema,
+      o.status,
+      o.observacao,
+      o.criado_em,
+      o.atualizado_em,
+      o.resolvido_em,
+      o.webhook_enviado
+    FROM public.ocorrencias o
+    JOIN public.localizacoes l ON l.id = o.id_localizacao
+    LEFT JOIN public.ambientes a ON a.id = l.id_ambiente
+    WHERE (p_predio IS NULL OR l.predio ILIKE '%' || p_predio || '%')
+      AND (p_tipo_problema IS NULL OR o.tipo_problema ILIKE '%' || p_tipo_problema || '%')
+      AND (p_status IS NULL OR lower(o.status) = lower(p_status))
+      AND (
+        p_localizacao IS NULL
+        OR l.identificador_extra ILIKE '%' || p_localizacao || '%'
+        OR l.andar ILIKE '%' || p_localizacao || '%'
+        OR a.nome ILIKE '%' || p_localizacao || '%'
+      )
+      AND (p_data_ini IS NULL OR o.criado_em >= p_data_ini::timestamptz)
+      AND (p_data_fim IS NULL OR o.criado_em < (p_data_fim + 1)::timestamptz)
+    ORDER BY o.criado_em DESC
+    LIMIT v_limit
+  ) x;
+
+  RETURN jsonb_build_object(
+    'total_encontrado', v_total,
+    'limite_aplicado', v_limit,
+    'itens', v_itens
+  );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.dexter_ocorrencias_busca(text, text, text, text, text, date, date, integer) FROM PUBLIC, anon, authenticated;
+
+COMMENT ON FUNCTION public.dexter_ocorrencias_busca(text, text, text, text, text, date, date, integer) IS
+  'Dexter: flexible/modular ocorrencias search. Optional filters: p_predio (substring, l.predio), p_tipo_problema (substring, o.tipo_problema), p_status (exact, o.status), p_localizacao (substring across l.identificador_extra/l.andar/a.nome), p_data_ini/p_data_fim (o.criado_em date range, inclusive). Returns {total_encontrado, limite_aplicado, itens} where itens is capped at p_limit (default 50, max 50) newest first. Gated by email via _dexter_assert_access.';
+
+-- ---------------------------------------------------------------------------
+-- 6) dexter_dimensoes(p_email text, p_dimensao text) -> jsonb
+--    Distinct values (+ counts) for a given dimension, so Dexter can discover
+--    valid filter values before calling dexter_ocorrencias_busca / other RPCs
+--    without guessing free text. p_dimensao IN ('predios', 'tipos_problema',
+--    'status', 'ambientes', 'categorias_ambiente', 'andares', 'localizacoes').
+--    Raises 22023 (dimensao_invalida) for any other value.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.dexter_dimensoes(
+  p_email text,
+  p_dimensao text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_dim text := lower(trim(COALESCE(p_dimensao, '')));
+  v_result jsonb;
+BEGIN
+  PERFORM public._dexter_assert_access(p_email);
+
+  IF v_dim = 'predios' THEN
+    SELECT COALESCE(jsonb_agg(row_to_json(x)), '[]'::jsonb) INTO v_result
+    FROM (
+      SELECT predio AS valor, COUNT(*) AS total
+      FROM public.localizacoes
+      GROUP BY predio
+      ORDER BY predio
+    ) x;
+
+  ELSIF v_dim = 'tipos_problema' THEN
+    SELECT COALESCE(jsonb_agg(row_to_json(x)), '[]'::jsonb) INTO v_result
+    FROM (
+      SELECT tipo_problema AS valor, COUNT(*) AS total
+      FROM public.ocorrencias
+      GROUP BY tipo_problema
+      ORDER BY total DESC
+    ) x;
+
+  ELSIF v_dim = 'status' THEN
+    SELECT COALESCE(jsonb_agg(row_to_json(x)), '[]'::jsonb) INTO v_result
+    FROM (
+      SELECT status AS valor, COUNT(*) AS total
+      FROM public.ocorrencias
+      GROUP BY status
+      ORDER BY total DESC
+    ) x;
+
+  ELSIF v_dim = 'ambientes' THEN
+    SELECT COALESCE(jsonb_agg(row_to_json(x)), '[]'::jsonb) INTO v_result
+    FROM (
+      SELECT a.nome AS valor, COUNT(l.id) AS total
+      FROM public.ambientes a
+      LEFT JOIN public.localizacoes l ON l.id_ambiente = a.id
+      GROUP BY a.nome
+      ORDER BY a.nome
+    ) x;
+
+  ELSIF v_dim = 'categorias_ambiente' THEN
+    SELECT COALESCE(jsonb_agg(row_to_json(x)), '[]'::jsonb) INTO v_result
+    FROM (
+      SELECT a.categoria AS valor, COUNT(l.id) AS total
+      FROM public.ambientes a
+      LEFT JOIN public.localizacoes l ON l.id_ambiente = a.id
+      GROUP BY a.categoria
+      ORDER BY a.categoria
+    ) x;
+
+  ELSIF v_dim = 'andares' THEN
+    SELECT COALESCE(jsonb_agg(row_to_json(x)), '[]'::jsonb) INTO v_result
+    FROM (
+      SELECT andar AS valor, COUNT(*) AS total
+      FROM public.localizacoes
+      GROUP BY andar
+      ORDER BY andar
+    ) x;
+
+  ELSIF v_dim = 'localizacoes' THEN
+    SELECT COALESCE(jsonb_agg(row_to_json(x)), '[]'::jsonb) INTO v_result
+    FROM (
+      SELECT identificador_extra AS valor, COUNT(*) AS total
+      FROM public.localizacoes
+      WHERE identificador_extra IS NOT NULL
+      GROUP BY identificador_extra
+      ORDER BY total DESC
+      LIMIT 50
+    ) x;
+
+  ELSE
+    RAISE EXCEPTION 'dimensao_invalida' USING ERRCODE = '22023',
+      DETAIL = format(
+        'Dimensao "%s" nao suportada. Use: predios, tipos_problema, status, ambientes, categorias_ambiente, andares, localizacoes.',
+        p_dimensao
+      );
+  END IF;
+
+  RETURN jsonb_build_object('dimensao', v_dim, 'valores', v_result);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.dexter_dimensoes(text, text) FROM PUBLIC, anon, authenticated;
+
+COMMENT ON FUNCTION public.dexter_dimensoes(text, text) IS
+  'Dexter: distinct values + counts for a filter dimension, so valid filter values can be discovered before calling dexter_ocorrencias_busca. p_dimensao IN (predios, tipos_problema, status, ambientes, categorias_ambiente, andares, localizacoes); raises 22023 (dimensao_invalida) otherwise. Gated by email via _dexter_assert_access.';

@@ -43,7 +43,9 @@
   --input: #d8dee4;
   --input-background: #ffffff;
   --ring: #3f76ff;
-  --radius: 0.875rem;
+  --radius: 1rem;
+  --font-sans: "DM Sans", ui-sans-serif, sans-serif;
+  --font-display: "Source Serif 4", "Times New Roman", serif;
 
   --sidebar: #ffffff;
   --sidebar-foreground: #14181b;
@@ -165,7 +167,12 @@
     -webkit-tap-highlight-color: transparent;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+    font-family: var(--font-sans);
+  }
+
+  .font-display {
+    font-family: var(--font-display);
+    font-optical-sizing: auto;
   }
 
   #root {
@@ -191,5 +198,206 @@
       color-mix(in srgb, var(--primary) 18%, transparent),
       transparent 50%
     );
+  }
+}
+
+/* =========================================================================
+ * Camadas de profundidade — sombras suaves, superfícies com leve gradiente
+ * e scrollbars finas. Tudo derivado dos tokens acima (nada de cor chapada
+ * nova); o objetivo é dar sensação de camada sem pesar a interface.
+ * ========================================================================= */
+@layer utilities {
+  /* Sombra suave para elementos "flutuantes" de baixo destaque (composer,
+   * itens de menu, botão de rolar para o fim). */
+  .shadow-elevate-sm {
+    box-shadow:
+      0 1px 2px color-mix(in srgb, var(--foreground) 6%, transparent),
+      0 6px 16px -10px color-mix(in srgb, var(--foreground) 22%, transparent);
+  }
+
+  /* Sombra mais pronunciada para painéis (dialogs, popovers relevantes). */
+  .shadow-elevate-md {
+    box-shadow:
+      0 2px 6px color-mix(in srgb, var(--foreground) 7%, transparent),
+      0 18px 36px -18px color-mix(in srgb, var(--foreground) 30%, transparent);
+  }
+
+  .dark .shadow-elevate-sm {
+    box-shadow:
+      0 1px 2px color-mix(in srgb, black 35%, transparent),
+      0 6px 18px -10px color-mix(in srgb, black 55%, transparent);
+  }
+
+  .dark .shadow-elevate-md {
+    box-shadow:
+      0 2px 8px color-mix(in srgb, black 40%, transparent),
+      0 20px 40px -18px color-mix(in srgb, black 60%, transparent);
+  }
+
+  /* Sheen sutil no topo das superfícies "card" — dá leve profundidade sem
+   * introduzir uma cor nova (usa foreground em opacidade baixíssima). */
+  .surface-sheen {
+    background-image: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--foreground) 3%, transparent),
+      transparent 45%
+    );
+  }
+
+  .dark .surface-sheen {
+    background-image: linear-gradient(
+      180deg,
+      color-mix(in srgb, white 4%, transparent),
+      transparent 45%
+    );
+  }
+
+  /* Anel de foco "glow" suave — usado no composer em vez do ring quadrado
+   * padrão do focus-visible. */
+  .focus-glow:focus-within {
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--ring) 18%, transparent),
+      0 2px 10px -4px color-mix(in srgb, var(--ring) 30%, transparent);
+    border-color: color-mix(in srgb, var(--ring) 55%, var(--border));
+  }
+
+  /* Scrollbar fina e discreta (sidebar, thread, listas longas). */
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--foreground) 18%, transparent) transparent;
+  }
+
+  .scroll-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scroll-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--foreground) 14%, transparent);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .scroll-thin::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in srgb, var(--foreground) 24%, transparent);
+  }
+
+  /* Ponto de status "vivo" (indicador Conexões) — pulso suave, respeita
+   * prefers-reduced-motion. */
+  .status-dot-live {
+    position: relative;
+  }
+
+  .status-dot-live::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: inherit;
+    animation: status-pulse 2.4s ease-out infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .status-dot-live::after {
+      animation: none;
+    }
+  }
+}
+
+@keyframes status-pulse {
+  0% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(2.4);
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-\[fade-up_0\.45s_ease-out\] {
+    animation: none !important;
+  }
+}
+
+/* =========================================================================
+ * Highlight de código (rehype-highlight) — tema próprio, ligado às cores
+ * semânticas do design system (não é um tema de highlight.js importado à
+ * parte), pra combinar com o resto da interface em light/dark.
+ * ========================================================================= */
+@layer base {
+  .hljs {
+    color: var(--foreground);
+    background: transparent;
+  }
+
+  .hljs-comment,
+  .hljs-quote {
+    color: var(--muted-foreground);
+    font-style: italic;
+  }
+
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-literal,
+  .hljs-section,
+  .hljs-link,
+  .hljs-operator {
+    color: var(--primary);
+  }
+
+  .hljs-string,
+  .hljs-title,
+  .hljs-name,
+  .hljs-type,
+  .hljs-attribute,
+  .hljs-symbol,
+  .hljs-bullet,
+  .hljs-addition,
+  .hljs-variable,
+  .hljs-template-tag,
+  .hljs-template-variable {
+    color: var(--success);
+  }
+
+  .hljs-number,
+  .hljs-meta,
+  .hljs-built_in,
+  .hljs-builtin-name,
+  .hljs-attr,
+  .hljs-deletion {
+    color: var(--warning);
+  }
+
+  .hljs-function .hljs-title,
+  .hljs-class .hljs-title,
+  .hljs-title.function_,
+  .hljs-title.class_ {
+    color: var(--secondary);
+  }
+
+  .hljs-emphasis {
+    font-style: italic;
+  }
+
+  .hljs-strong {
+    font-weight: 600;
   }
 }
