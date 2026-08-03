@@ -1,0 +1,64 @@
+# AgentCore — stack de deploy (Portainer / DigitalOcean).
+#
+# IMPORTANTE sobre segredos:
+#   O `env_file: .env` abaixo é para uso LOCAL (dev/homolog na máquina do
+#   dev, com um .env não commitado — veja .env.example).
+#   Em PRODUÇÃO (Portainer), os segredos (ANTHROPIC_API_KEY,
+#   SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL, etc.) NÃO vêm de um .env
+#   commitado: são injetados pelo Infisical (projeto "agentcore") via
+#   variáveis de ambiente da stack/serviço no próprio Portainer. Se o
+#   arquivo .env não existir no host de produção, remova/ajuste a chave
+#   `env_file` e configure as variáveis diretamente na stack do Portainer.
+#
+# Redis está previsto aqui para suportar o BullMQ (fila assíncrona — ver
+# AGENTCORE_SPEC.md, seção "Fila assíncrona"). Ainda não é consumido pelo
+# código do runtime (não há REDIS_URL em src/config.ts); o serviço já fica
+# disponível na rede da stack para quando essa etapa for implementada.
+
+services:
+  agentcore:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agentcore-server:latest
+    container_name: agentcore
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    environment:
+      # Uso futuro do BullMQ (ver comentário acima). Sobrescreva/injete via
+      # Infisical/Portainer em produção junto com as demais variáveis.
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: agentcore-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:

@@ -1,0 +1,32 @@
+# Dependências e build
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+
+# Secrets / env local
+.env
+.env.*
+!.env.example
+
+# Logs e cache
+logs/
+*.log
+.npm
+.pnpm-store/
+
+# Editor / SO
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Claude / Cursor local
+.claude/settings.local.json
+.cursor/
