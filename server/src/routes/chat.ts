@@ -7,12 +7,17 @@
 import type { FastifyInstance } from "fastify"
 import { z } from "zod"
 
+import type Anthropic from "@anthropic-ai/sdk"
+
 import { streamChat, type LlmMessage } from "../llm/router.js"
 import { resolveModel } from "../llm/models.js"
 import { endSSE, initSSE, writeSSE } from "../lib/sse.js"
 import { DEXTER_SYSTEM_PROMPT } from "../llm/system-prompt.js"
 import { resolveUser } from "../services/auth.js"
 import { getMessages, insertMessage, upsertChat } from "../services/chat-store.js"
+import { resolveAccess, accessSummary, type SystemAccess } from "../systems/access.js"
+import { runAgentLoop, type ToolCallRecord } from "../systems/agent-loop.js"
+import { auditToolCall } from "../systems/audit.js"
 
 const chatMessageSchema = z.object({
   id: z.string(),
@@ -36,10 +41,24 @@ const chatRequestSchema = z.object({
   context: chatContextSchema.optional(),
 })
 
-/** Monta o system prompt final, citando o sistema-alvo quando informado. */
-function buildSystemPrompt(context: z.infer<typeof chatContextSchema> | undefined): string {
-  if (!context?.system) return DEXTER_SYSTEM_PROMPT
-  return `${DEXTER_SYSTEM_PROMPT}\n\nContexto desta conversa: sistema alvo "${context.system}".`
+/** Monta o system prompt final: base + contexto + o que o usuário acessa. */
+function buildSystemPrompt(
+  context: z.infer<typeof chatContextSchema> | undefined,
+  access: SystemAccess[]
+): string {
+  let prompt = DEXTER_SYSTEM_PROMPT
+  if (context?.system) {
+    prompt += `\n\nContexto desta conversa: sistema alvo "${context.system}".`
+  }
+  prompt +=
+    "\n\n## Acesso deste usuário aos sistemas GoWork\n" +
+    accessSummary(access) +
+    "\n\nRegras de dados:\n" +
+    "- Para responder sobre dados de um sistema que o usuário acessa, USE as tools (elas retornam o dado real, já no escopo dele).\n" +
+    "- NUNCA invente números, valores ou listas — só afirme o que as tools retornarem.\n" +
+    "- Se a tool retornar erro de acesso, ou o usuário perguntar sobre um sistema que ele não acessa, diga que ele não tem acesso àquele dado.\n" +
+    "- Responda em português, de forma objetiva."
+  return prompt
 }
 
 export default async function chatRoutes(app: FastifyInstance): Promise<void> {
@@ -57,7 +76,11 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       return
     }
 
-    const { userId } = await resolveUser(request)
+    const { userId, email } = await resolveUser(request)
+
+    // Preflight de acesso: o que este usuário (por email) enxerga em cada
+    // sistema. Vazio se não houver email ou nenhum sistema configurado.
+    const access = email ? await resolveAccess(email) : []
 
     // Se ainda não há mensagens no chat, é uma conversa nova — usa a 1ª
     // mensagem do usuário (truncada) como título.
@@ -87,7 +110,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       .filter((m) => m.role !== "system")
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }))
 
-    const systemPrompt = buildSystemPrompt(body.context)
+    const systemPrompt = buildSystemPrompt(body.context, access)
 
     // Modelo escolhido na interface (context.model) — cai no default se ausente.
     const modelInfo = resolveModel(body.context?.model)
@@ -99,31 +122,80 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
 
     let fullText = ""
     try {
-      const handle = streamChat({
-        provider: modelInfo.provider,
-        model: modelInfo.model,
-        systemPrompt,
-        messages: llmMessages,
-        signal: controller.signal,
-      })
+      let usedModel = modelInfo.model
+      let tokensIn: number | undefined
+      let tokensOut: number | undefined
+      const toolCalls: ToolCallRecord[] = []
 
-      for await (const delta of handle.textDeltas) {
-        fullText += delta
-        writeSSE(reply, { event: "text-delta", data: { textDelta: delta } })
+      if (modelInfo.provider === "anthropic") {
+        // Caminho com tools: o Claude pode consultar os sistemas via RPCs
+        // read-only com gate. O backend injeta o email do usuário autenticado
+        // em cada chamada — o LLM nunca escolhe de quem é o dado.
+        const result = await runAgentLoop({
+          model: modelInfo.model,
+          systemPrompt,
+          messages: llmMessages as Anthropic.MessageParam[],
+          access,
+          email: email ?? "",
+          signal: controller.signal,
+          onTextDelta: (t) => {
+            fullText += t
+            writeSSE(reply, { event: "text-delta", data: { textDelta: t } })
+          },
+          onToolCall: (rec) => {
+            toolCalls.push(rec)
+            writeSSE(reply, {
+              event: "tool-call",
+              data: { toolCallId: rec.toolName, toolName: rec.fn ?? rec.toolName, args: rec.input },
+            })
+          },
+        })
+        usedModel = result.model
+        tokensIn = result.inputTokens
+        tokensOut = result.outputTokens
+      } else {
+        // Provider sem tools (ex.: self-hosted) — streaming simples.
+        const handle = streamChat({
+          provider: modelInfo.provider,
+          model: modelInfo.model,
+          systemPrompt,
+          messages: llmMessages,
+          signal: controller.signal,
+        })
+        for await (const delta of handle.textDeltas) {
+          fullText += delta
+          writeSSE(reply, { event: "text-delta", data: { textDelta: delta } })
+        }
+        const result = await handle.result()
+        usedModel = result.model
+        tokensIn = result.inputTokens
+        tokensOut = result.outputTokens
       }
-
-      const result = await handle.result()
 
       await insertMessage({
         chatId: body.threadId,
         userId,
         role: "assistant",
         content: fullText,
-        model: result.model,
-        tokensIn: result.inputTokens,
-        tokensOut: result.outputTokens,
+        model: usedModel,
+        tokensIn,
+        tokensOut,
         traceId: request.traceId,
       })
+
+      // Auditoria LGPD de cada tool call (best-effort).
+      for (const tc of toolCalls) {
+        await auditToolCall({
+          chatId: body.threadId,
+          userId,
+          toolName: tc.toolName,
+          input: tc.input,
+          output: tc.ok ? tc.output : { error: tc.error },
+          status: tc.ok ? "ok" : "error",
+          durationMs: tc.durationMs,
+          traceId: request.traceId,
+        })
+      }
 
       writeSSE(reply, { event: "done", data: {} })
     } catch (err) {

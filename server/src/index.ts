@@ -10,6 +10,7 @@ import Fastify from "fastify"
 import { config, corsOrigins } from "./config.js"
 import chatRoutes from "./routes/chat.js"
 import chatsRoutes from "./routes/chats.js"
+import connectionsRoutes from "./routes/connections.js"
 import modelsRoutes from "./routes/models.js"
 import { AuthError, ForbiddenError, NotFoundError } from "./services/auth.js"
 
@@ -64,6 +65,7 @@ app.get("/healthz", async () => ({ status: "ok" }))
 
 await app.register(chatRoutes)
 await app.register(chatsRoutes)
+await app.register(connectionsRoutes)
 await app.register(modelsRoutes)
 
 async function start(): Promise<void> {

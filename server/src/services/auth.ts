@@ -11,6 +11,8 @@ import { supabase } from "../lib/supabase.js"
 
 export interface ResolvedUser {
   userId: string
+  /** email verificado (do JWT) — chave de identidade para as RPCs dos sistemas. */
+  email?: string
 }
 
 export class AuthError extends Error {
@@ -66,7 +68,7 @@ export async function resolveUser(req: FastifyRequest): Promise<ResolvedUser> {
       req.log.warn({ err: error }, "JWT inválido/expirado")
       throw new AuthError("Sessão inválida ou expirada.")
     }
-    return { userId: data.user.id }
+    return { userId: data.user.id, email: data.user.email ?? undefined }
   } catch (err) {
     if (err instanceof AuthError) throw err
     req.log.warn({ err }, "Falha ao validar JWT no Supabase")

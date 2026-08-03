@@ -16,6 +16,7 @@ import { useTheme } from "@/providers/theme-provider"
 import { useAuth } from "@/providers/auth-provider"
 import { useSidebar } from "@/hooks/use-sidebar"
 import { useChats } from "@/lib/chats"
+import { ConnectionsDialog } from "@/components/chat/connections-dialog"
 import { ModelSelector } from "@/components/chat/model-selector"
 import { updateProfileTheme } from "@/lib/supabase"
 import type { Theme } from "@/providers/theme-provider"
@@ -76,6 +77,7 @@ export function Header() {
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
+        <ConnectionsDialog />
         <ModelSelector />
 
         <DropdownMenu>
