@@ -4,6 +4,9 @@
 
 FROM node:22-alpine AS build
 
+LABEL org.opencontainers.image.source="https://github.com/goworksistemas/dexter"
+LABEL org.opencontainers.image.description="Dexter Web"
+
 RUN corepack enable && corepack prepare pnpm@9 --activate
 
 WORKDIR /app

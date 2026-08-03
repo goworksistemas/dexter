@@ -5,6 +5,9 @@
 
 FROM node:22-alpine
 
+LABEL org.opencontainers.image.source="https://github.com/goworksistemas/dexter"
+LABEL org.opencontainers.image.description="Dexter AgentCore API"
+
 RUN corepack enable && corepack prepare pnpm@9 --activate
 
 # Infisical CLI (Alpine)

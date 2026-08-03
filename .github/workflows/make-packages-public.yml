@@ -2,6 +2,9 @@ name: Make GHCR packages public
 
 on:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Publish images (GHCR)"]
+    types: [completed]
 
 permissions:
   packages: write
@@ -9,18 +12,21 @@ permissions:
 
 jobs:
   public:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Set dexter-agentcore public
+      - name: Make packages public
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh api -X PUT "/user/packages/container/dexter-agentcore/visibility" \
-            -f visibility=public
-
-      - name: Set dexter-web public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api -X PUT "/user/packages/container/dexter-web/visibility" \
-            -f visibility=public
+          set -e
+          for pkg in dexter-agentcore dexter-web; do
+            echo "→ $pkg"
+            gh api -X PUT "/user/packages/container/${pkg}/visibility" -f visibility=public \
+              || gh api -X PUT "/orgs/goworksistemas/packages/container/${pkg}/visibility" -f visibility=public \
+              || true
+            # fallback: repo-linked package URL encode
+            gh api -X PUT "/user/packages/container/${pkg}/visibility" \
+              -H "Accept: application/vnd.github+json" \
+              -f visibility=public || echo "WARN: não conseguiu publicizar $pkg"
+          done
