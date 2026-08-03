@@ -1,0 +1,26 @@
+name: Make GHCR packages public
+
+on:
+  workflow_dispatch:
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  public:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set dexter-agentcore public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PUT "/user/packages/container/dexter-agentcore/visibility" \
+            -f visibility=public
+
+      - name: Set dexter-web public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PUT "/user/packages/container/dexter-web/visibility" \
+            -f visibility=public
