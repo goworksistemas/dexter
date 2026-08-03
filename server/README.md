@@ -95,29 +95,16 @@ Lista as mensagens de uma conversa específica (histórico completo do chat `:id
 
 ## Deploy (Portainer / DigitalOcean)
 
-Arquivos relevantes: [`Dockerfile`](./Dockerfile), [`docker-compose.yml`](./docker-compose.yml).
+Produção (Traefik + GHCR + UI): ver [`../DEPLOY_PORTAINER.md`](../DEPLOY_PORTAINER.md)
+e o compose [`../docker-compose.portainer.yml`](../docker-compose.portainer.yml).
 
-1. **Build da imagem** — a partir deste diretório (`server/`):
-   ```bash
-   docker build -t agentcore-server:latest .
-   ```
-   A imagem usa `node:22-alpine`, habilita `pnpm` via Corepack, instala as
-   deps (`pnpm install --frozen-lockfile`) e roda `pnpm start` (`tsx
-   src/index.ts` — **sem** etapa de build/`dist`, já que o app roda via
-   `tsx` também em produção). Container roda como usuário não-root.
+Local / homolog com build no host: [`Dockerfile`](./Dockerfile) +
+[`docker-compose.yml`](./docker-compose.yml).
 
-2. **Stack no Portainer** — publicar/usar o `docker-compose.yml`, que sobe:
-   - `agentcore`: a API, porta `8787`, `restart: unless-stopped`, healthcheck em `/healthz`;
-   - `redis`: `redis:7-alpine` com volume persistente — **previsto para o
-     BullMQ** (fila assíncrona do AGENTCORE_SPEC.md, fase 3), ainda não
-     consumido pelo runtime atual.
+```bash
+docker build -t agentcore-server:latest .
+docker compose up -d
+```
 
-3. **Segredos** — em produção, **não** usar o `.env` commitado. Injetar
-   `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` etc.
-   como variáveis de ambiente do serviço/stack no próprio Portainer,
-   alimentadas pelo **Infisical** (projeto `agentcore`). O
-   `docker-compose.yml` documenta isso inline.
-
-4. **Health check** — o Portainer/DO deve monitorar `GET /healthz`
-   (já configurado como `HEALTHCHECK` na imagem e no compose) para
-   restart automático em caso de falha.
+Em produção os segredos vêm do **Infisical** (projeto `agentcore`) via
+variáveis da stack no Portainer — nunca de `.env` commitado.

@@ -1,0 +1,101 @@
+# =============================================================================
+# Dexter / AgentCore — stack de PRODUÇÃO (Portainer + Traefik)
+#
+# Como publicar:
+#   1. Criar rede Docker externa `dexter` e anexá-la ao container Traefik
+#      (mesmo padrão das redes `ia` / `litellm` da stack GoWork IA).
+#   2. Em Portainer → Stacks → Add stack → Upload deste arquivo
+#      (não use o Web Editor: backticks do Traefik quebram lá).
+#   3. Preencher Environment variables da stack (Infisical projeto agentcore):
+#        ANTHROPIC_API_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL,
+#        CORS_ORIGINS, LLM_PROVIDER, ANTHROPIC_MODEL, OLLAMA_BASE_URL,
+#        OLLAMA_MODEL, ALLOW_DEV_USER=false
+#   4. DNS: dexter.gowork.com.br → IP do host Portainer
+#   5. Imagens: ghcr.io/goworksistemas/dexter-agentcore e dexter-web
+#      (workflow .github/workflows/publish-images.yml). Se o pacote for
+#      privado, cadastre o registry GHCR em Portainer → Registries.
+# =============================================================================
+
+services:
+  agentcore:
+    image: ghcr.io/goworksistemas/dexter-agentcore:latest
+    container_name: dexter-agentcore
+    restart: unless-stopped
+    environment:
+      PORT: "8787"
+      HOST: "0.0.0.0"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://dexter.gowork.com.br}
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.gowork.com.br}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-4096}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      ALLOW_DEV_USER: ${ALLOW_DEV_USER:-false}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-60}
+      RATE_LIMIT_WINDOW: ${RATE_LIMIT_WINDOW:-1 minute}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  web:
+    image: ghcr.io/goworksistemas/dexter-web:latest
+    container_name: dexter-web
+    restart: unless-stopped
+    depends_on:
+      agentcore:
+        condition: service_healthy
+    networks:
+      - internal
+      - dexter
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=dexter
+      - traefik.http.routers.dexter.rule=Host(`dexter.gowork.com.br`)
+      - traefik.http.routers.dexter.entrypoints=websecure
+      - traefik.http.routers.dexter.tls=true
+      - traefik.http.routers.dexter.tls.certresolver=leresolver
+      - traefik.http.services.dexter.loadbalancer.server.port=80
+
+  redis:
+    image: redis:7-alpine
+    container_name: dexter-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+
+networks:
+  internal:
+    driver: bridge
+  # Rede externa já anexada ao Traefik (criar antes do deploy da stack).
+  dexter:
+    external: true

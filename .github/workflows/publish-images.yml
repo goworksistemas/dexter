@@ -1,0 +1,83 @@
+name: Publish images (GHCR)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - "web/**"
+      - ".github/workflows/publish-images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: goworksistemas
+
+jobs:
+  agentcore:
+    name: Build dexter-agentcore
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          file: ./server/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/dexter-agentcore:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/dexter-agentcore:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  web:
+    name: Build dexter-web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve Vite public env
+        id: vite
+        run: |
+          URL="${{ vars.VITE_SUPABASE_URL }}"
+          KEY="${{ vars.VITE_SUPABASE_ANON_KEY }}"
+          if [ -z "$URL" ]; then URL="https://jtvscxbwralvzpfhtqcs.supabase.co"; fi
+          if [ -z "$KEY" ]; then KEY="sb_publishable_kFlwniXEs8I417oPapd2zQ_VVr87Vkq"; fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./web
+          file: ./web/Dockerfile
+          push: true
+          build-args: |
+            VITE_SUPABASE_URL=${{ steps.vite.outputs.url }}
+            VITE_SUPABASE_ANON_KEY=${{ steps.vite.outputs.key }}
+            VITE_AGENTCORE_URL=
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/dexter-web:latest
+            ${{ env.REGISTRY }}/${{ env.OWNER }}/dexter-web:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
