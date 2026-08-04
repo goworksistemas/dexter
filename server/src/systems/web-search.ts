@@ -24,6 +24,10 @@ const MAX_RESULTS_CAP = 10
 const DEFAULT_RESULTS = 6
 const FETCH_CHARS_CAP = 40_000
 const FETCH_CHARS_DEFAULT = 20_000
+/** Só engines de qualidade na categoria general — sem isso, quando o Google
+ * bloqueia o IP do datacenter sobram engines fracos devolvendo lixo. */
+const GENERAL_ENGINES = "google,bing,duckduckgo,brave"
+const DEFAULT_LANGUAGE = "pt-BR"
 
 export function isWebToolName(name: string): boolean {
   return name.startsWith(WEB_TOOL_PREFIX)
@@ -67,8 +71,12 @@ export async function buildWebTools(): Promise<AnthropicTool[]> {
       description:
         "[Internet] Busca na web (SearXNG). Use para informação EXTERNA: notícias, docs públicas, " +
         "preços de mercado, legislação, empresas externas, fatos recentes. NUNCA para dados internos " +
-        "GoWork (chamados, OS, clientes, vendas — use as tools dos sistemas). Devolve título, URL e " +
-        "resumo; para ler uma página inteira use web__fetch em seguida.",
+        "GoWork (chamados, OS, clientes, vendas — use as tools dos sistemas). " +
+        'Como buscar bem: use aspas para nome/frase exata ("Heritage Realty" São Paulo), ' +
+        "adicione contexto que desambigue (cidade, empresa, CNPJ, site:linkedin.com/in para perfis), " +
+        "e se os resultados vierem irrelevantes REFINE e tente 2-3 variações antes de desistir. " +
+        "Busca em pt-BR por padrão — para conteúdo em inglês passe language. " +
+        "Devolve título, URL e resumo; para ler uma página inteira use web__fetch em seguida.",
       input_schema: {
         type: "object",
         properties: {
@@ -84,6 +92,12 @@ export async function buildWebTools(): Promise<AnthropicTool[]> {
           category: {
             type: "string",
             description: "general (default) | news | it | science. Opcional.",
+          },
+          language: {
+            type: "string",
+            description:
+              `Idioma/região dos resultados (default ${DEFAULT_LANGUAGE}). ` +
+              'Use "en-US" para conteúdo em inglês ou "all" para sem filtro.',
           },
         },
         required: ["q"],
@@ -182,12 +196,21 @@ async function executarBusca(
   url.searchParams.set("q", q)
   url.searchParams.set("format", "json")
   url.searchParams.set("safesearch", "1")
+
+  // Idioma/região: sem isso, busca em português volta lixo genérico dos EUA.
+  const language = String(input.language ?? "").trim() || DEFAULT_LANGUAGE
+  if (language !== "all") url.searchParams.set("language", language)
+
   const timeRange = String(input.time_range ?? "").trim()
   if (["day", "week", "month", "year"].includes(timeRange)) {
     url.searchParams.set("time_range", timeRange)
   }
   const category = String(input.category ?? "").trim()
-  if (category && category !== "general") url.searchParams.set("categories", category)
+  if (category && category !== "general") {
+    url.searchParams.set("categories", category)
+  } else {
+    url.searchParams.set("engines", GENERAL_ENGINES)
+  }
 
   const res = await fetch(url, {
     signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
@@ -212,7 +235,7 @@ async function executarBusca(
     resultados,
     dica: resultados.length
       ? "Para o conteúdo completo de um resultado, chame web__fetch com a URL."
-      : "Nada encontrado — tente outros termos ou sem time_range.",
+      : "Nada encontrado — refine os termos, tente variações (aspas, site:, empresa em vez de pessoa) ou language 'all'.",
   }
 }
 
