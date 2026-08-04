@@ -4,7 +4,11 @@ import { toast } from "sonner"
 
 import { AuthLayout } from "@/components/auth/auth-layout"
 import { Button } from "@/components/ui/button"
-import { exchangeCodeForSession, hasSupabase } from "@/lib/supabase"
+import {
+  exchangeCodeForSession,
+  hasSupabase,
+  verifyEmailOtp,
+} from "@/lib/supabase"
 
 /**
  * Troca o `?code=` do fluxo PKCE (confirmação de e-mail / magic link)
@@ -26,11 +30,30 @@ export function AuthCallbackPage() {
 
       const params = new URLSearchParams(window.location.search)
       const code = params.get("code")
+      const tokenHash = params.get("token_hash")
       const errDesc =
         params.get("error_description") || params.get("error") || null
 
       if (errDesc) {
         if (active) setError(errDesc)
+        return
+      }
+
+      // Cross-login (NetworkGo) e magic links: token_hash consumido aqui via
+      // verifyOtp — o flowType pkce do client rejeita tokens no hash da URL.
+      if (tokenHash) {
+        try {
+          await verifyEmailOtp(tokenHash)
+          navigate("/", { replace: true })
+        } catch (err) {
+          if (active) {
+            setError(
+              err instanceof Error
+                ? err.message
+                : "Não foi possível confirmar a sessão.",
+            )
+          }
+        }
         return
       }
 

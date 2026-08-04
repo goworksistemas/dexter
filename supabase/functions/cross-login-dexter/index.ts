@@ -3,7 +3,8 @@
  *
  * O front do NetworkGo (logado) faz POST { access_token } aqui; a funcao valida o
  * token no projeto Supabase do NetworkGo, garante a conta no Dexter (ver abaixo)
- * e devolve um magic link (action_link) para redirecionar o browser.
+ * e devolve a URL /auth/callback?token_hash=... do Dexter, onde o app troca o
+ * token_hash por sessao via verifyOtp.
  *
  * Auto-provisiona usuarios SOMENTE de dominios da allowlist
  * (public.dexter_allowed_email_domains, checada via RPC is_allowed_email):
@@ -152,7 +153,7 @@ Deno.serve(async (req) => {
       options: { redirectTo: DEXTER_HOME },
     })
 
-    if (linkError || !linkData?.properties?.action_link) {
+    if (linkError || !linkData?.properties?.hashed_token) {
       console.error('[cross-login-dexter] Erro ao gerar link:', linkError)
       return new Response(JSON.stringify({ error: 'Erro ao gerar link de acesso' }), {
         status: 500,
@@ -160,7 +161,14 @@ Deno.serve(async (req) => {
       })
     }
 
-    return new Response(JSON.stringify({ url: linkData.properties.action_link }), {
+    // NAO usar o action_link: (1) o verify redireciona com tokens no hash e o
+    // client web (flowType pkce) rejeita `#access_token=`; (2) scanners de
+    // link corporativos fazem GET no action_link antes do browser e queimam o
+    // token de uso unico. O token_hash so e consumido pelo JS do app, na
+    // pagina /auth/callback, via verifyOtp.
+    const callbackUrl = `${DEXTER_HOME}auth/callback?token_hash=${encodeURIComponent(linkData.properties.hashed_token)}`
+
+    return new Response(JSON.stringify({ url: callbackUrl }), {
       headers: jsonHeaders,
     })
   } catch (error) {

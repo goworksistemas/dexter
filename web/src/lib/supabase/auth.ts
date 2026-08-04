@@ -159,3 +159,19 @@ export async function exchangeCodeForSession(code: string) {
   if (error) throw new Error(mapAuthError(error))
   return data
 }
+
+/**
+ * Troca `token_hash` (magic link / cross-login) por sessão via verifyOtp.
+ * Necessário porque o client usa flowType pkce, que rejeita tokens no hash
+ * (`#access_token=`) — e o token_hash só é consumido aqui, pelo JS do app,
+ * imune a scanners de link que "queimam" o action_link de uso único.
+ */
+export async function verifyEmailOtp(tokenHash: string) {
+  const client = requireSupabase()
+  const { data, error } = await client.auth.verifyOtp({
+    type: "email",
+    token_hash: tokenHash,
+  })
+  if (error) throw new Error(mapAuthError(error))
+  return data
+}
