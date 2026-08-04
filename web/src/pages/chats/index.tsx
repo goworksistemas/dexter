@@ -1,10 +1,21 @@
 import * as React from "react"
-import { MessageSquare, MoreHorizontal, Plus, Search } from "lucide-react"
+import {
+  GitFork,
+  Loader2,
+  MessageSquare,
+  MoreHorizontal,
+  Plus,
+  Search,
+  Share2,
+  X,
+} from "lucide-react"
+import { toast } from "sonner"
 
 import {
   ChatActionDropdownItems,
   ChatActionsOverlays,
 } from "@/components/chat/chat-actions"
+import { ChatCostInfo } from "@/components/chat/cost-info"
 import { PageHeading, PageShell } from "@/components/layout/page-shell"
 import { Button } from "@/components/ui/button"
 import {
@@ -18,6 +29,122 @@ import { useChatActions, useChatRuns, useChats } from "@/lib/chats"
 import { formatRelative } from "@/lib/dates"
 import { useProjects } from "@/lib/projects"
 import { RunningDots } from "@/components/layout/sidebar/shared"
+import {
+  fetchPendingChatShares,
+  forkChatShare,
+  revokeUserChatShare,
+  type ChatUserShare,
+} from "@/lib/share/api"
+
+function PendingSharesSection({
+  onForked,
+}: {
+  onForked: (chatId: string) => void
+}) {
+  const [shares, setShares] = React.useState<ChatUserShare[]>([])
+  const [loading, setLoading] = React.useState(true)
+  const [busyId, setBusyId] = React.useState<string | null>(null)
+
+  const reload = React.useCallback(async () => {
+    setLoading(true)
+    try {
+      setShares(await fetchPendingChatShares())
+    } catch {
+      setShares([])
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    void reload()
+  }, [reload])
+
+  if (loading || shares.length === 0) return null
+
+  return (
+    <div className="mt-4 overflow-hidden rounded-xl border border-violet-500/30 bg-violet-500/5">
+      <div className="flex items-center gap-2 border-b border-violet-500/20 px-4 py-2.5">
+        <Share2 className="size-4 text-violet-700 dark:text-violet-300" />
+        <p className="text-sm font-medium text-violet-900 dark:text-violet-100">
+          Compartilhadas com você
+        </p>
+        <span className="text-xs text-violet-700/80 dark:text-violet-300/80">
+          {shares.length}
+        </span>
+      </div>
+      <ul className="divide-y divide-violet-500/15">
+        {shares.map((s) => (
+          <li
+            key={s.id}
+            className="flex flex-wrap items-center gap-2 px-4 py-2.5"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium">
+                {s.chatTitle?.trim() || "Conversa sem título"}
+              </p>
+              <p className="truncate text-xs text-muted-foreground">
+                De {s.fromName || s.fromEmail || "colega"}
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              className="gap-1.5"
+              disabled={busyId === s.id}
+              onClick={() => {
+                setBusyId(s.id)
+                void forkChatShare(s.id)
+                  .then(({ chatId }) => {
+                    setShares((prev) => prev.filter((x) => x.id !== s.id))
+                    toast.success("Cópia criada — a conversa é sua agora.")
+                    onForked(chatId)
+                  })
+                  .catch((err) => {
+                    toast.error(
+                      err instanceof Error ? err.message : "Falha ao criar cópia.",
+                    )
+                  })
+                  .finally(() => setBusyId(null))
+              }}
+            >
+              {busyId === s.id ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <GitFork className="size-3.5" />
+              )}
+              Criar cópia
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="size-8"
+              aria-label="Recusar convite"
+              disabled={busyId === s.id}
+              onClick={() => {
+                setBusyId(s.id)
+                void revokeUserChatShare(s.id)
+                  .then(() => {
+                    setShares((prev) => prev.filter((x) => x.id !== s.id))
+                    toast.success("Convite recusado.")
+                  })
+                  .catch((err) => {
+                    toast.error(
+                      err instanceof Error ? err.message : "Falha ao recusar.",
+                    )
+                  })
+                  .finally(() => setBusyId(null))
+              }}
+            >
+              <X className="size-3.5" />
+            </Button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
 
 export function ChatsPage() {
   const {
@@ -65,6 +192,13 @@ export function ChatsPage() {
             Nova conversa
           </Button>
         }
+      />
+
+      <PendingSharesSection
+        onForked={(chatId) => {
+          refreshChats()
+          selectChat(chatId)
+        }}
       />
 
       <div className="relative mt-5">
@@ -161,6 +295,7 @@ export function ChatsPage() {
                       {title}
                     </span>
                     {runningChatIds.has(chat.id) ? <RunningDots /> : null}
+                    <ChatCostInfo costUsd={chat.cost_usd} />
                     {project ? (
                       <span className="hidden max-w-40 shrink-0 truncate rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground sm:inline">
                         {project}
@@ -200,6 +335,10 @@ export function ChatsPage() {
         moveDialog={chatActions.moveDialog}
         onMoveDialogOpenChange={(open) =>
           chatActions.setMoveDialog((prev) => ({ ...prev, open }))
+        }
+        shareDialog={chatActions.shareDialog}
+        onShareDialogOpenChange={(open) =>
+          chatActions.setShareDialog((prev) => ({ ...prev, open }))
         }
       />
     </PageShell>

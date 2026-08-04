@@ -7,6 +7,7 @@ import { FileCode2, Loader2 } from "lucide-react"
 
 import { HtmlPreview } from "@/components/artifacts/html-preview"
 import { Markdown } from "@/components/chat/markdown"
+import { PublicRiskBanner } from "@/components/share/public-risk-banner"
 import { Button } from "@/components/ui/button"
 import { fetchPublicArtifact } from "@/lib/share/api"
 
@@ -68,10 +69,11 @@ export function ShareArtifactPage() {
 
   return (
     <div className="flex h-dvh flex-col bg-background">
+      <PublicRiskBanner />
       <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border/70 px-4 py-3 sm:px-6">
         <div className="min-w-0">
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Artefato publicado
+            Artefato publicado · somente leitura
           </p>
           <h1 className="truncate text-base font-semibold">{artifact.title}</h1>
           <p className="text-[11px] text-muted-foreground">

@@ -45,8 +45,10 @@ import { formatRelative } from "@/lib/dates"
 import { useAuth } from "@/providers/auth-provider"
 import type { DexterRole } from "@/types"
 import { cn } from "@/lib/utils"
+import { fmtUsd } from "@/lib/format/money"
 import { AdminModelsPanel } from "./models-panel"
 import { AdminKbPanel } from "./kb-panel"
+import { AdminCostCenterPanel, COST_CENTER_PERIODS } from "./cost-center-panel"
 
 const PERIODS = [
   { days: 7, label: "7d" },
@@ -90,14 +92,6 @@ function fmtCompact(n: number | null | undefined): string {
   return new Intl.NumberFormat("pt-BR", {
     notation: "compact",
     maximumFractionDigits: 1,
-  }).format(Number(n ?? 0))
-}
-
-function fmtUsd(n: number | null | undefined): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 4,
   }).format(Number(n ?? 0))
 }
 
@@ -226,7 +220,7 @@ function ModelTable({ rows }: { rows: AdminModelStat[] }) {
 export function AdminPage() {
   const { user, isLoading: authLoading } = useAuth()
   const [adminTab, setAdminTab] = React.useState<
-    "analytics" | "models" | "kb" | "users"
+    "analytics" | "custos" | "models" | "kb" | "users"
   >("analytics")
   const [days, setDays] = React.useState(30)
   const [users, setUsers] = React.useState<AdminUserRow[]>([])
@@ -351,6 +345,7 @@ export function AdminPage() {
       role?: DexterRole
       disabled?: boolean
       allowed_models?: string[] | null
+      usage_budget_usd?: number | null
     },
   ) => {
     setBusyId(id)
@@ -410,9 +405,10 @@ export function AdminPage() {
                 Chaves & acessos
               </Link>
             </Button>
-            {adminTab === "analytics" ? (
+            {adminTab === "analytics" || adminTab === "custos" ? (
               <div className="flex items-center gap-1 rounded-lg border border-border p-0.5">
-                {PERIODS.map((p) => (
+                {(adminTab === "custos" ? COST_CENTER_PERIODS : PERIODS).map(
+                  (p) => (
                   <button
                     key={p.days}
                     type="button"
@@ -426,7 +422,8 @@ export function AdminPage() {
                   >
                     {p.label}
                   </button>
-                ))}
+                ),
+                )}
               </div>
             ) : null}
           </div>
@@ -436,13 +433,16 @@ export function AdminPage() {
       <Tabs
         value={adminTab}
         onValueChange={(v) =>
-          setAdminTab(v as "analytics" | "models" | "kb" | "users")
+          setAdminTab(v as "analytics" | "custos" | "models" | "kb" | "users")
         }
         className="mt-6 gap-4"
       >
         <TabsList variant="line" className="w-full justify-start">
           <TabsTrigger value="analytics" className="flex-none">
             Analytics
+          </TabsTrigger>
+          <TabsTrigger value="custos" className="flex-none">
+            Central de custo
           </TabsTrigger>
           <TabsTrigger value="models" className="flex-none">
             Modelos
@@ -454,6 +454,10 @@ export function AdminPage() {
             Usuários
           </TabsTrigger>
         </TabsList>
+
+        <TabsContent value="custos" className="mt-0">
+          <AdminCostCenterPanel days={days} />
+        </TabsContent>
 
         <TabsContent value="models" className="mt-0">
           <AdminModelsPanel />
@@ -588,6 +592,7 @@ export function AdminPage() {
                     <p>{fmtCompact(u.tokens)} tok</p>
                     <p>
                       {fmtNum(u.chats)} chats · {fmtNum(u.messages)} msgs
+                      {Number(u.cost_usd) > 0 ? ` · ${fmtUsd(u.cost_usd)}` : ""}
                     </p>
                   </div>
                 </button>
@@ -781,7 +786,7 @@ export function AdminPage() {
                   <Kpi
                     label="Tokens período"
                     value={fmtCompact(detail.totals.tokens_period)}
-                    hint={`in ${fmtCompact(detail.totals.tokens_in_period)} · out ${fmtCompact(detail.totals.tokens_out_period)}`}
+                    hint={`in ${fmtCompact(detail.totals.tokens_in_period)} · out ${fmtCompact(detail.totals.tokens_out_period)}${Number(detail.totals.cost_usd_period) > 0 ? ` · ${fmtUsd(detail.totals.cost_usd_period)}` : ""}`}
                     icon={Coins}
                   />
                   <Kpi
@@ -812,6 +817,7 @@ export function AdminPage() {
                             <th className="px-3 py-2 font-medium">Título</th>
                             <th className="px-3 py-2 font-medium">Msgs</th>
                             <th className="px-3 py-2 font-medium">Tokens</th>
+                            <th className="px-3 py-2 font-medium">Custo</th>
                             <th className="px-3 py-2 font-medium">Modelo</th>
                             <th className="px-3 py-2 font-medium">Atualizado</th>
                           </tr>
@@ -820,7 +826,7 @@ export function AdminPage() {
                           {detail.chats.length === 0 ? (
                             <tr>
                               <td
-                                colSpan={5}
+                                colSpan={6}
                                 className="px-3 py-6 text-center text-muted-foreground"
                               >
                                 Nenhuma conversa.
@@ -846,6 +852,11 @@ export function AdminPage() {
                                 </td>
                                 <td className="px-3 py-2 tabular-nums text-muted-foreground">
                                   {fmtCompact(c.tokens)}
+                                </td>
+                                <td className="px-3 py-2 tabular-nums text-muted-foreground">
+                                  {Number(c.cost_usd_period) > 0
+                                    ? fmtUsd(c.cost_usd_period)
+                                    : "—"}
                                 </td>
                                 <td className="max-w-[120px] truncate px-3 py-2 text-xs text-muted-foreground">
                                   {c.last_model || "—"}
@@ -962,6 +973,40 @@ export function AdminPage() {
                             Modelos liberados e chaves dedicadas
                           </Link>
                         </Button>
+
+                        <div>
+                          <label
+                            htmlFor="admin-user-budget"
+                            className="mb-1.5 block text-xs font-medium text-muted-foreground"
+                          >
+                            Orçamento mensal (USD)
+                          </label>
+                          <Input
+                            id="admin-user-budget"
+                            type="number"
+                            min={0}
+                            step={0.01}
+                            className="h-9 max-w-xs tabular-nums"
+                            placeholder="Sem limite"
+                            defaultValue={detail.profile.usage_budget_usd ?? ""}
+                            disabled={busyId === detail.profile.id}
+                            onBlur={(e) => {
+                              const raw = e.target.value.trim()
+                              const next =
+                                raw === "" ? null : Number.parseFloat(raw)
+                              if (raw !== "" && !Number.isFinite(next)) return
+                              const cur = detail.profile.usage_budget_usd ?? null
+                              if (next === cur) return
+                              void applyPatch(detail.profile.id, {
+                                usage_budget_usd: next,
+                              })
+                            }}
+                          />
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            Vazio = sem teto. Providers free (Ollama) continuam
+                            disponíveis.
+                          </p>
+                        </div>
                       </>
                     )}
                   </TabsContent>
@@ -984,8 +1029,8 @@ export function AdminPage() {
       </Dialog>
 
       <p className="mt-6 text-xs text-muted-foreground">
-        Master: bpm@gowork.com.br. Tokens usam tokens_in + tokens_out quando
-        disponíveis; custo aparece só se cost_usd estiver preenchido.
+        Master: bpm@gowork.com.br. Preços de modelos sincronizam na discovery;
+        custo por mensagem é calculado automaticamente.
       </p>
     </PageShell>
   )

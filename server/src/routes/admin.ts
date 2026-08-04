@@ -6,6 +6,7 @@ import { z } from "zod"
 
 import {
   assertStaff,
+  fetchAdminCostCenter,
   fetchAdminOverview,
   fetchAdminUserDetail,
   listAdminUsers,
@@ -16,7 +17,22 @@ import {
 import {
   bulkUpsertModelOverrides,
   upsertModelOverride,
+  type ModelCostTier,
 } from "../services/model-store.js"
+import {
+  listProviderMeta,
+  patchProviderMeta,
+  type ProviderCreditStatus,
+} from "../services/provider-meta-store.js"
+import {
+  backfillMessageCosts,
+  listModelPricing,
+  upsertModelPricing,
+} from "../services/model-pricing.js"
+import {
+  invalidatePricingSyncCache,
+  syncCatalogPricing,
+} from "../services/pricing-sync.js"
 import {
   createKbDoc,
   deleteKbDoc,
@@ -53,13 +69,15 @@ const patchSchema = z
       .max(500)
       .nullable()
       .optional(),
+    usage_budget_usd: z.number().min(0).max(1_000_000).nullable().optional(),
   })
   .refine(
     (v) =>
       v.role !== undefined ||
       v.disabled !== undefined ||
-      v.allowed_models !== undefined,
-    { message: "Informe role, disabled e/ou allowed_models." },
+      v.allowed_models !== undefined ||
+      v.usage_budget_usd !== undefined,
+    { message: "Informe role, disabled, allowed_models e/ou usage_budget_usd." },
   )
 
 const daysSchema = z.coerce.number().int().min(1).max(365).default(30)
@@ -71,10 +89,36 @@ const modelPatchSchema = z
     label: z.string().min(1).max(120).nullable().optional(),
     description: z.string().max(2000).nullable().optional(),
     sort_order: z.number().int().min(0).max(10_000).nullable().optional(),
+    cost_tier: z
+      .enum(["free", "cheap", "standard", "premium"])
+      .nullable()
+      .optional(),
   })
   .refine((v) => Object.keys(v).length > 0, {
     message: "Informe ao menos um campo.",
   })
+
+const providerPatchSchema = z
+  .strictObject({
+    label: z.string().min(1).max(80).optional(),
+    default_cost_tier: z
+      .enum(["free", "cheap", "standard", "premium"])
+      .nullable()
+      .optional(),
+    credit_status: z
+      .enum(["available", "low", "depleted", "unknown"])
+      .optional(),
+    balance_usd: z.number().min(0).max(10_000_000).nullable().optional(),
+    low_threshold_usd: z.number().min(0).max(10_000_000).nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, {
+    message: "Informe ao menos um campo.",
+  })
+
+const pricingPatchSchema = z.strictObject({
+  input_usd_per_million: z.number().min(0).max(10_000).nullable().optional(),
+  output_usd_per_million: z.number().min(0).max(10_000).nullable().optional(),
+})
 
 /** Base de conhecimento: mesmo domínio dos checks da migration 0020. */
 const kbSlugSchema = z
@@ -136,6 +180,17 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return { overview, actorRole: actor.role as DexterRole }
   })
 
+  app.get("/api/admin/cost-center", async (req) => {
+    const user = await resolveUser(req)
+    const actor = await loadActorProfile(user.userId, user.email)
+    await assertStaff(actor)
+    const q = req.query as { days?: string }
+    const days = daysSchema.parse(q.days ?? 30)
+    await backfillMessageCosts().catch(() => {})
+    const costCenter = await fetchAdminCostCenter(days)
+    return { costCenter, actorRole: actor.role as DexterRole }
+  })
+
   app.get("/api/admin/users", async (req) => {
     const user = await resolveUser(req)
     const actor = await loadActorProfile(user.userId, user.email)
@@ -172,11 +227,15 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     },
   )
 
-  app.get("/api/admin/models", async (req) => {
+  app.get<{ Querystring: { probe?: string } }>(
+    "/api/admin/models",
+    async (req) => {
     const user = await resolveUser(req)
     const actor = await loadActorProfile(user.userId, user.email)
     await assertStaff(actor)
-    const models = await listAllDiscoveredModels(true)
+    const force =
+      req.query.probe === "1" || req.query.probe === "true"
+    const models = await listAllDiscoveredModels(force)
     return {
       models: models.map((m) => ({
         id: m.id,
@@ -194,10 +253,100 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
         released_at: m.releasedAt ?? null,
         credential_ok: m.credentialOk,
         latency_ms: m.latencyMs ?? null,
+        input_usd_per_million: m.inputUsdPerMillion ?? null,
+        output_usd_per_million: m.outputUsdPerMillion ?? null,
+        provider_label: m.providerLabel,
       })),
       providers: await providerStatus(),
+      provider_meta: (await listProviderMeta()).map((p) => ({
+        id: p.id,
+        label: p.label,
+        default_cost_tier: p.default_cost_tier,
+        credit_status: p.credit_status,
+        balance_usd: p.balance_usd,
+        low_threshold_usd: p.low_threshold_usd,
+      })),
       actorRole: actor.role as DexterRole,
     }
+  })
+
+  app.get("/api/admin/providers", async (req) => {
+    const user = await resolveUser(req)
+    const actor = await loadActorProfile(user.userId, user.email)
+    await assertStaff(actor)
+    return {
+      providers: await listProviderMeta(),
+      actorRole: actor.role as DexterRole,
+    }
+  })
+
+  app.patch<{ Params: { id: string } }>(
+    "/api/admin/providers/:id",
+    async (req) => {
+      const user = await resolveUser(req)
+      const actor = await loadActorProfile(user.userId, user.email)
+      await assertStaff(actor)
+      const body = providerPatchSchema.parse(req.body)
+      const updated = await patchProviderMeta(req.params.id, {
+        ...(body.label !== undefined ? { label: body.label } : {}),
+        ...(body.default_cost_tier !== undefined
+          ? { default_cost_tier: body.default_cost_tier as ModelCostTier | null }
+          : {}),
+        ...(body.credit_status !== undefined
+          ? { credit_status: body.credit_status as ProviderCreditStatus }
+          : {}),
+        ...(body.balance_usd !== undefined
+          ? { balance_usd: body.balance_usd }
+          : {}),
+        ...(body.low_threshold_usd !== undefined
+          ? { low_threshold_usd: body.low_threshold_usd }
+          : {}),
+      })
+      invalidateModelProbeCache()
+      return { provider: updated, actorRole: actor.role as DexterRole }
+    },
+  )
+
+  app.get("/api/admin/pricing", async (req) => {
+    const user = await resolveUser(req)
+    const actor = await loadActorProfile(user.userId, user.email)
+    await assertStaff(actor)
+    return {
+      pricing: await listModelPricing(),
+      actorRole: actor.role as DexterRole,
+    }
+  })
+
+  app.patch<{ Params: { id: string } }>(
+    "/api/admin/pricing/:id",
+    async (req) => {
+      const user = await resolveUser(req)
+      const actor = await loadActorProfile(user.userId, user.email)
+      await assertStaff(actor)
+      const body = pricingPatchSchema.parse(req.body)
+      const updated = await upsertModelPricing(req.params.id, body)
+      return { pricing: updated, actorRole: actor.role as DexterRole }
+    },
+  )
+
+  app.post("/api/admin/pricing/sync", async (req) => {
+    const user = await resolveUser(req)
+    const actor = await loadActorProfile(user.userId, user.email)
+    await assertStaff(actor)
+    invalidatePricingSyncCache()
+    invalidateModelProbeCache()
+    const models = await listAllDiscoveredModels(true)
+    const result = await syncCatalogPricing(
+      models
+        .filter((m) => m.enabled !== false)
+        .map((m) => ({
+          id: m.id,
+          provider: m.provider,
+          model: m.model,
+        })),
+    )
+    const backfilled = await backfillMessageCosts().catch(() => 0)
+    return { ...result, backfilled, actorRole: actor.role as DexterRole }
   })
 
   // --- Chaves de API globais dos provedores (banco, cifradas) ---------------
@@ -353,7 +502,9 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
           input_token_limit: live?.inputTokenLimit ?? null,
           released_at: live?.releasedAt ?? null,
           credential_ok: live?.credentialOk ?? false,
-          latency_ms: live?.latencyMs ?? null,
+          input_usd_per_million: live?.inputUsdPerMillion ?? null,
+          output_usd_per_million: live?.outputUsdPerMillion ?? null,
+          provider_label: live?.providerLabel ?? live?.provider ?? "",
         },
       }
     },

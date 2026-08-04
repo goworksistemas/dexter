@@ -1,5 +1,5 @@
 /**
- * API de compartilhamento público (chats e artefatos).
+ * API de compartilhamento (colega com fork + link público).
  */
 import { getAccessToken } from "@/lib/supabase/auth"
 
@@ -9,6 +9,21 @@ export interface ShareLinkStatus {
   shared: boolean
   shareToken: string | null
   sharedAt: string | null
+}
+
+export interface ChatUserShare {
+  id: string
+  chatId: string
+  chatTitle: string | null
+  fromUserId: string
+  fromName: string | null
+  fromEmail: string | null
+  toUserId: string
+  toName: string | null
+  toEmail: string | null
+  status: "pending" | "forked" | "revoked"
+  forkedChatId: string | null
+  createdAt: string
 }
 
 export interface PublicChatMessage {
@@ -37,12 +52,23 @@ async function authHeaders(): Promise<Record<string, string>> {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
-function shareError(response: Response, fallback: string): Error {
+async function shareError(response: Response, fallback: string): Promise<Error> {
   if (response.status === 401) {
     return new Error("Sessão inválida. Faça login novamente.")
   }
   if (response.status === 404) {
     return new Error("Recurso não encontrado.")
+  }
+  try {
+    const body = (await response.json()) as { error?: string; message?: string }
+    if (typeof body.message === "string" && body.message) {
+      return new Error(body.message)
+    }
+    if (typeof body.error === "string" && body.error && body.error !== "invalid_request") {
+      return new Error(body.error)
+    }
+  } catch {
+    /* ignore */
   }
   return new Error(`${fallback} (${response.status})`)
 }
@@ -61,7 +87,7 @@ export async function fetchChatShareStatus(
   const response = await fetch(`${BASE_URL}/chats/${chatId}/share`, {
     headers: await authHeaders(),
   })
-  if (!response.ok) throw shareError(response, "Falha ao consultar compartilhamento")
+  if (!response.ok) throw await shareError(response, "Falha ao consultar compartilhamento")
   return response.json()
 }
 
@@ -70,7 +96,7 @@ export async function publishChatShare(chatId: string): Promise<ShareLinkStatus>
     method: "POST",
     headers: await authHeaders(),
   })
-  if (!response.ok) throw shareError(response, "Falha ao publicar conversa")
+  if (!response.ok) throw await shareError(response, "Falha ao publicar conversa")
   return response.json()
 }
 
@@ -80,7 +106,81 @@ export async function revokeChatShare(chatId: string): Promise<void> {
     headers: await authHeaders(),
   })
   if (!response.ok && response.status !== 204) {
-    throw shareError(response, "Falha ao revogar link")
+    throw await shareError(response, "Falha ao revogar link")
+  }
+}
+
+export async function fetchChatUserShares(
+  chatId: string,
+): Promise<ChatUserShare[]> {
+  const response = await fetch(`${BASE_URL}/chats/${chatId}/share-users`, {
+    headers: await authHeaders(),
+  })
+  if (!response.ok) throw await shareError(response, "Falha ao listar convites")
+  const body = (await response.json()) as { shares: ChatUserShare[] }
+  return body.shares ?? []
+}
+
+export interface ShareableColleague {
+  id: string
+  email: string | null
+  fullName: string | null
+  avatarUrl: string | null
+}
+
+export async function fetchShareableColleagues(): Promise<ShareableColleague[]> {
+  const response = await fetch(`${BASE_URL}/me/colleagues`, {
+    headers: await authHeaders(),
+  })
+  if (!response.ok) throw await shareError(response, "Falha ao listar colegas")
+  const body = (await response.json()) as { colleagues: ShareableColleague[] }
+  return body.colleagues ?? []
+}
+
+export async function inviteChatUserShare(
+  chatId: string,
+  target: { userId?: string; email?: string },
+): Promise<ChatUserShare> {
+  const response = await fetch(`${BASE_URL}/chats/${chatId}/share-users`, {
+    method: "POST",
+    headers: {
+      ...(await authHeaders()),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(target),
+  })
+  if (!response.ok) throw await shareError(response, "Falha ao compartilhar")
+  const body = (await response.json()) as { share: ChatUserShare }
+  return body.share
+}
+
+export async function fetchPendingChatShares(): Promise<ChatUserShare[]> {
+  const response = await fetch(`${BASE_URL}/me/chat-shares`, {
+    headers: await authHeaders(),
+  })
+  if (!response.ok) throw await shareError(response, "Falha ao carregar convites")
+  const body = (await response.json()) as { shares: ChatUserShare[] }
+  return body.shares ?? []
+}
+
+export async function forkChatShare(
+  shareId: string,
+): Promise<{ chatId: string; share: ChatUserShare }> {
+  const response = await fetch(`${BASE_URL}/me/chat-shares/${shareId}/fork`, {
+    method: "POST",
+    headers: await authHeaders(),
+  })
+  if (!response.ok) throw await shareError(response, "Falha ao criar cópia")
+  return response.json()
+}
+
+export async function revokeUserChatShare(shareId: string): Promise<void> {
+  const response = await fetch(`${BASE_URL}/me/chat-shares/${shareId}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  })
+  if (!response.ok && response.status !== 204) {
+    throw await shareError(response, "Falha ao revogar convite")
   }
 }
 
@@ -90,7 +190,7 @@ export async function fetchArtifactShareStatus(
   const response = await fetch(`${BASE_URL}/artifacts/${artifactId}/share`, {
     headers: await authHeaders(),
   })
-  if (!response.ok) throw shareError(response, "Falha ao consultar publicação")
+  if (!response.ok) throw await shareError(response, "Falha ao consultar publicação")
   return response.json()
 }
 
@@ -101,7 +201,7 @@ export async function publishArtifactShare(
     method: "POST",
     headers: await authHeaders(),
   })
-  if (!response.ok) throw shareError(response, "Falha ao publicar artefato")
+  if (!response.ok) throw await shareError(response, "Falha ao publicar artefato")
   return response.json()
 }
 
@@ -111,7 +211,7 @@ export async function revokeArtifactShare(artifactId: string): Promise<void> {
     headers: await authHeaders(),
   })
   if (!response.ok && response.status !== 204) {
-    throw shareError(response, "Falha ao revogar link")
+    throw await shareError(response, "Falha ao revogar link")
   }
 }
 

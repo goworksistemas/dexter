@@ -128,6 +128,14 @@ async function lastSignInMap(): Promise<Map<string, string | null>> {
   return map
 }
 
+export async function fetchAdminCostCenter(days = 30): Promise<unknown> {
+  const { data, error } = await supabase.rpc("dexter_admin_cost_center", {
+    p_days: days,
+  })
+  if (error) throw new Error(`dexter_admin_cost_center: ${error.message}`)
+  return data
+}
+
 export async function fetchAdminOverview(days = 30): Promise<unknown> {
   const { data, error } = await supabase.rpc("dexter_admin_overview", {
     p_days: days,
@@ -187,6 +195,8 @@ export interface PatchUserInput {
   disabled?: boolean
   /** null = liberar todos os modelos; array = restringir a estes ids. */
   allowed_models?: string[] | null
+  /** Teto USD no mês corrente (null = sem limite). */
+  usage_budget_usd?: number | null
 }
 
 export async function patchAdminUser(
@@ -275,6 +285,9 @@ export async function patchAdminUser(
   if (patch.disabled === false) update.disabled_at = null
   if (patch.allowed_models !== undefined) {
     update.allowed_models = patch.allowed_models
+  }
+  if (patch.usage_budget_usd !== undefined) {
+    update.usage_budget_usd = patch.usage_budget_usd
   }
 
   if (Object.keys(update).length === 0) {

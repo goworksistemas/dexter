@@ -6,6 +6,7 @@ import { Link } from "react-router-dom"
 import { Loader2, MessageSquare } from "lucide-react"
 
 import { Markdown } from "@/components/chat/markdown"
+import { PublicRiskBanner } from "@/components/share/public-risk-banner"
 import { Button } from "@/components/ui/button"
 import { fetchPublicChat, type PublicChatMessage } from "@/lib/share/api"
 import { cn } from "@/lib/utils"
@@ -98,10 +99,11 @@ export function ShareChatPage() {
 
   return (
     <div className="flex h-dvh flex-col bg-background">
+      <PublicRiskBanner />
       <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border/70 px-4 py-3 sm:px-6">
         <div className="min-w-0">
           <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Conversa compartilhada
+            Conversa compartilhada · somente leitura
           </p>
           <h1 className="truncate text-base font-semibold">
             {payload.title?.trim() || "Conversa sem título"}

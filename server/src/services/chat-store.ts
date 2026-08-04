@@ -38,6 +38,7 @@ export interface InsertMessageParams {
   model?: string
   tokensIn?: number
   tokensOut?: number
+  costUsd?: number | null
   traceId?: string
 }
 
@@ -47,6 +48,8 @@ export interface ChatSummary {
   project_id: string | null
   updated_at: string
   model: string | null
+  /** Soma de cost_usd das mensagens do chat (USD). Presente em listChats. */
+  cost_usd?: number
 }
 
 export interface StoredMessage {
@@ -54,6 +57,10 @@ export interface StoredMessage {
   role: ChatRole
   content: string
   created_at: string
+  model?: string | null
+  tokens_in?: number | null
+  tokens_out?: number | null
+  cost_usd?: number | null
 }
 
 export interface ChatRow {
@@ -158,6 +165,7 @@ export async function insertMessage(params: InsertMessageParams): Promise<string
   if (params.model !== undefined) row.model = params.model
   if (params.tokensIn !== undefined) row.tokens_in = params.tokensIn
   if (params.tokensOut !== undefined) row.tokens_out = params.tokensOut
+  if (params.costUsd !== undefined) row.cost_usd = params.costUsd
   if (params.traceId !== undefined) row.trace_id = params.traceId
 
   const { data, error } = await supabase
@@ -204,6 +212,28 @@ export async function getChatToolCalls(
   return (data ?? []) as StoredToolCall[]
 }
 
+async function attachChatCosts(
+  userId: string,
+  chats: Omit<ChatSummary, "cost_usd">[],
+): Promise<ChatSummary[]> {
+  if (chats.length === 0) return []
+  const { data, error } = await supabase.rpc("dexter_sum_chat_costs", {
+    p_user_id: userId,
+    p_chat_ids: chats.map((c) => c.id),
+  })
+  if (error) {
+    return chats.map((c) => ({ ...c, cost_usd: 0 }))
+  }
+  const byId = new Map<string, number>()
+  for (const row of data ?? []) {
+    byId.set(String(row.chat_id), Number(row.cost_usd ?? 0))
+  }
+  return chats.map((c) => ({
+    ...c,
+    cost_usd: byId.get(c.id) ?? 0,
+  }))
+}
+
 /** Chats do usuário, mais recentes primeiro — para a sidebar. */
 export async function listChats(userId: string): Promise<ChatSummary[]> {
   const { data, error } = await supabase
@@ -215,7 +245,10 @@ export async function listChats(userId: string): Promise<ChatSummary[]> {
   if (error) {
     throw new Error(`listChats falhou: ${error.message}`)
   }
-  return (data ?? []) as ChatSummary[]
+  return attachChatCosts(
+    userId,
+    (data ?? []) as Omit<ChatSummary, "cost_usd">[],
+  )
 }
 
 /** Pina o modelo de UMA conversa (troca feita pelo usuário no seletor). */
@@ -238,7 +271,10 @@ export async function setChatModel(
   if (error) {
     throw new Error(`setChatModel falhou: ${error.message}`)
   }
-  return data as ChatSummary
+  const [withCost] = await attachChatCosts(userId, [
+    data as Omit<ChatSummary, "cost_usd">,
+  ])
+  return withCost ?? null
 }
 
 /**
@@ -253,7 +289,9 @@ export async function getMessages(
   // 1 round-trip: ownership + mensagens (evita assert + select separados).
   const { data, error } = await supabase
     .from("agent_messages")
-    .select("id, role, content, created_at, chat:agent_chats!inner(user_id)")
+    .select(
+      "id, role, content, created_at, model, tokens_in, tokens_out, cost_usd, chat:agent_chats!inner(user_id)",
+    )
     .eq("chat_id", chatId)
     .eq("chat.user_id", userId)
     .order("created_at", { ascending: true })
@@ -273,6 +311,10 @@ export async function getMessages(
     role: row.role as ChatRole,
     content: row.content as string,
     created_at: row.created_at as string,
+    model: (row.model as string | null) ?? null,
+    tokens_in: row.tokens_in != null ? Number(row.tokens_in) : null,
+    tokens_out: row.tokens_out != null ? Number(row.tokens_out) : null,
+    cost_usd: row.cost_usd != null ? Number(row.cost_usd) : null,
   }))
 
   for (const row of rows) {
@@ -306,7 +348,9 @@ export async function getMessagesPage(
 
   let query = supabase
     .from("agent_messages")
-    .select("id, role, content, created_at, chat:agent_chats!inner(user_id)")
+    .select(
+      "id, role, content, created_at, model, tokens_in, tokens_out, cost_usd, chat:agent_chats!inner(user_id)",
+    )
     .eq("chat_id", chatId)
     .eq("chat.user_id", userId)
     .order("created_at", { ascending: false })
@@ -346,6 +390,10 @@ export async function getMessagesPage(
     role: row.role as ChatRole,
     content: row.content as string,
     created_at: row.created_at as string,
+    model: (row.model as string | null) ?? null,
+    tokens_in: row.tokens_in != null ? Number(row.tokens_in) : null,
+    tokens_out: row.tokens_out != null ? Number(row.tokens_out) : null,
+    cost_usd: row.cost_usd != null ? Number(row.cost_usd) : null,
   }))
 
   for (const row of rows) {

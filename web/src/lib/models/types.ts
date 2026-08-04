@@ -10,6 +10,9 @@ export type ModelProvider =
   | "xai"
   | "ollama"
 
+/** De onde vem a chave de API efetiva para este modelo. */
+export type ModelKeySource = "free" | "personal" | "company"
+
 export interface ModelCapabilities {
   vision: boolean
   files: boolean
@@ -20,12 +23,23 @@ export interface ModelInfo {
   id: string
   label: string
   provider: ModelProvider
+  /** Rótulo humano do provider (ex.: "Anthropic"). */
+  providerLabel?: string
   description?: string
   traits?: string[]
   capabilities?: ModelCapabilities
   available?: boolean
   latencyMs?: number
   error?: string
+  /** USD por 1M tokens de entrada (sync automático). */
+  inputUsdPerMillion?: number | null
+  /** USD por 1M tokens de saída (sync automático). */
+  outputUsdPerMillion?: number | null
+  keySource?: ModelKeySource
+  /** Últimos 4 dígitos quando keySource === personal. */
+  keyLast4?: string
+  inputTokenLimit?: number | null
+  maxOutputTokens?: number | null
 }
 
 export interface ModelsResponse {

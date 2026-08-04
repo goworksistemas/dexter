@@ -24,10 +24,18 @@ import {
   bulkPatchAdminModels,
   fetchAdminModels,
   patchAdminModel,
+  patchAdminProvider,
   type AdminCatalogModel,
   type AdminModelProvider,
+  type AdminProviderMeta,
 } from "@/lib/admin/api"
-import { useModels } from "@/lib/models"
+import {
+  useModels,
+  formatUsdPerMillion,
+  modelCostTier,
+  modelCostTierClass,
+  modelPricingTag,
+} from "@/lib/models"
 import { cn } from "@/lib/utils"
 
 const PROVIDERS: AdminModelProvider[] = [
@@ -40,19 +48,6 @@ const PROVIDERS: AdminModelProvider[] = [
 ]
 
 type ModelsTab = "all" | AdminModelProvider
-
-function providerLabel(p: AdminModelProvider): string {
-  if (p === "anthropic") return "Claude"
-  if (p === "openai") return "OpenAI"
-  if (p === "gemini") return "Gemini"
-  if (p === "deepseek") return "DeepSeek"
-  if (p === "xai") return "Grok"
-  return "Ollama"
-}
-
-function tabLabel(tab: ModelsTab): string {
-  return tab === "all" ? "Todos" : providerLabel(tab)
-}
 
 function formatReleasedAt(iso?: string | null): string {
   if (!iso) return "—"
@@ -79,8 +74,22 @@ type SortKey =
   | "released_at"
   | "input_token_limit"
   | "max_output_tokens"
+  | "input_usd_per_million"
+  | "output_usd_per_million"
+  | "cost_avg"
   | "status"
   | "provider"
+
+function avgCostUsd(m: {
+  input_usd_per_million?: number | null
+  output_usd_per_million?: number | null
+}): number | null {
+  const vals = [m.input_usd_per_million, m.output_usd_per_million].filter(
+    (n): n is number => n != null && Number.isFinite(n) && n >= 0,
+  )
+  if (vals.length === 0) return null
+  return vals.reduce((a, b) => a + b, 0) / vals.length
+}
 
 type SortDir = "asc" | "desc"
 
@@ -90,6 +99,7 @@ const NO_VISIBLE_MODEL_MSG =
 export function AdminModelsPanel() {
   const { refreshModels } = useModels()
   const [models, setModels] = React.useState<AdminCatalogModel[]>([])
+  const [providerMeta, setProviderMeta] = React.useState<AdminProviderMeta[]>([])
   const [providers, setProviders] = React.useState<
     Record<string, { credential: boolean }>
   >({})
@@ -105,13 +115,14 @@ export function AdminModelsPanel() {
   const [sortKey, setSortKey] = React.useState<SortKey>("released_at")
   const [sortDir, setSortDir] = React.useState<SortDir>("desc")
 
-  const load = React.useCallback(async () => {
+  const load = React.useCallback(async (opts?: { probe?: boolean }) => {
     setLoading(true)
     setError(null)
     try {
-      const data = await fetchAdminModels()
+      const data = await fetchAdminModels({ probe: opts?.probe })
       setModels(data.models)
       setProviders(data.providers ?? {})
+      setProviderMeta(data.provider_meta ?? [])
     } catch (err) {
       setError(err instanceof Error ? err.message : "Falha ao carregar.")
     } finally {
@@ -120,8 +131,14 @@ export function AdminModelsPanel() {
   }, [])
 
   React.useEffect(() => {
-    void load()
+    void load({ probe: false })
   }, [load])
+
+  const providerLabel = React.useCallback(
+    (p: AdminModelProvider) =>
+      providerMeta.find((m) => m.id === p)?.label ?? p,
+    [providerMeta],
+  )
 
   React.useEffect(() => {
     setSelected(new Set())
@@ -195,6 +212,33 @@ export function AdminModelsPanel() {
           else cmp = ta - tb
           break
         }
+        case "input_usd_per_million": {
+          const ta = num(a.input_usd_per_million)
+          const tb = num(b.input_usd_per_million)
+          if (ta == null && tb == null) cmp = 0
+          else if (ta == null) cmp = 1
+          else if (tb == null) cmp = -1
+          else cmp = ta - tb
+          break
+        }
+        case "output_usd_per_million": {
+          const ta = num(a.output_usd_per_million)
+          const tb = num(b.output_usd_per_million)
+          if (ta == null && tb == null) cmp = 0
+          else if (ta == null) cmp = 1
+          else if (tb == null) cmp = -1
+          else cmp = ta - tb
+          break
+        }
+        case "cost_avg": {
+          const ta = avgCostUsd(a)
+          const tb = avgCostUsd(b)
+          if (ta == null && tb == null) cmp = 0
+          else if (ta == null) cmp = 1
+          else if (tb == null) cmp = -1
+          else cmp = ta - tb
+          break
+        }
         case "status":
           cmp = Number(a.enabled) - Number(b.enabled)
           break
@@ -260,6 +304,23 @@ export function AdminModelsPanel() {
       refreshModels()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao atualizar.")
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const applyProviderMeta = async (
+    id: string,
+    patch: { label?: string },
+  ) => {
+    setBusyId(`provider:${id}`)
+    try {
+      await patchAdminProvider(id, patch)
+      await load()
+      refreshModels()
+      toast.success("Provider atualizado.")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha no provider.")
     } finally {
       setBusyId(null)
     }
@@ -343,7 +404,7 @@ export function AdminModelsPanel() {
             variant="outline"
             className="gap-1.5"
             disabled={loading || bulkBusy || busyId !== null}
-            onClick={() => void load()}
+            onClick={() => void load({ probe: true })}
           >
             <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
             Atualizar
@@ -364,7 +425,7 @@ export function AdminModelsPanel() {
             variant="outline"
             size="sm"
             className="mt-2"
-            onClick={() => void load()}
+            onClick={() => void load({ probe: true })}
           >
             Tentar de novo
           </Button>
@@ -378,6 +439,36 @@ export function AdminModelsPanel() {
           </p>
         </div>
       ) : (
+        <>
+        {providerMeta.length > 0 ? (
+          <div className="border-b border-border px-4 py-3">
+            <p className="text-xs font-medium text-foreground">
+              Providers — rótulo
+            </p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {providerMeta.map((p) => (
+                <div
+                  key={p.id}
+                  className="flex flex-col gap-2 rounded-lg border border-border/70 bg-muted/20 p-2.5"
+                >
+                  <label className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    {p.id}
+                  </label>
+                  <Input
+                    defaultValue={p.label}
+                    className="h-8 text-xs"
+                    disabled={busyId === `provider:${p.id}`}
+                    onBlur={(e) => {
+                      const label = e.target.value.trim()
+                      if (!label || label === p.label) return
+                      void applyProviderMeta(p.id, { label })
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
         <Tabs
           value={tab}
           onValueChange={(v) => setTab(v as ModelsTab)}
@@ -546,6 +637,30 @@ export function AdminModelsPanel() {
                           onClick={() => toggleSort("max_output_tokens")}
                         />
                       </th>
+                      <th className="hidden px-2 py-2 font-medium xl:table-cell">
+                        <SortButton
+                          label="$/1M méd."
+                          active={sortKey === "cost_avg"}
+                          dir={sortDir}
+                          onClick={() => toggleSort("cost_avg")}
+                        />
+                      </th>
+                      <th className="hidden px-2 py-2 font-medium xl:table-cell">
+                        <SortButton
+                          label="$/1M in"
+                          active={sortKey === "input_usd_per_million"}
+                          dir={sortDir}
+                          onClick={() => toggleSort("input_usd_per_million")}
+                        />
+                      </th>
+                      <th className="hidden px-2 py-2 font-medium xl:table-cell">
+                        <SortButton
+                          label="$/1M out"
+                          active={sortKey === "output_usd_per_million"}
+                          dir={sortDir}
+                          onClick={() => toggleSort("output_usd_per_million")}
+                        />
+                      </th>
                       <th className="px-2 py-2 font-medium">
                         <SortButton
                           label="Status"
@@ -561,7 +676,7 @@ export function AdminModelsPanel() {
                     {filtered.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={8}
+                          colSpan={11}
                           className="px-4 py-8 text-center text-muted-foreground"
                         >
                           Nenhum modelo neste filtro.
@@ -614,6 +729,14 @@ export function AdminModelsPanel() {
                                 <div className="min-w-0">
                                   <p className="flex flex-wrap items-center gap-1.5 font-medium">
                                     <span className="truncate">{m.label}</span>
+                                    <span
+                                      className={cn(
+                                        "rounded px-1 py-0.5 text-[10px] font-medium",
+                                        modelCostTierClass(modelCostTier(m)),
+                                      )}
+                                    >
+                                      {modelPricingTag(m)}
+                                    </span>
                                     {tab === "all" ? (
                                       <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-normal text-muted-foreground">
                                         {providerLabel(m.provider)}
@@ -658,6 +781,15 @@ export function AdminModelsPanel() {
                               </td>
                               <td className="hidden px-2 py-2 align-middle text-xs tabular-nums text-muted-foreground lg:table-cell">
                                 {formatTokens(m.max_output_tokens)}
+                              </td>
+                              <td className="hidden px-2 py-2 align-middle text-xs font-medium tabular-nums text-foreground xl:table-cell">
+                                {formatUsdPerMillion(avgCostUsd(m))}
+                              </td>
+                              <td className="hidden px-2 py-2 align-middle text-xs tabular-nums text-muted-foreground xl:table-cell">
+                                {formatUsdPerMillion(m.input_usd_per_million)}
+                              </td>
+                              <td className="hidden px-2 py-2 align-middle text-xs tabular-nums text-muted-foreground xl:table-cell">
+                                {formatUsdPerMillion(m.output_usd_per_million)}
                               </td>
                               <td className="px-2 py-2 align-middle">
                                 {m.enabled ? (
@@ -717,7 +849,7 @@ export function AdminModelsPanel() {
                             </tr>
                             {open ? (
                               <tr className="border-b border-border/60 bg-muted/20">
-                                <td colSpan={8} className="px-4 py-3">
+                                <td colSpan={11} className="px-4 py-3">
                                   <dl className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-3">
                                     <div>
                                       <dt className="text-muted-foreground">
@@ -769,6 +901,18 @@ export function AdminModelsPanel() {
                                     </div>
                                     <div>
                                       <dt className="text-muted-foreground">
+                                        Preço (USD / 1M tokens)
+                                      </dt>
+                                      <dd className="mt-0.5 tabular-nums text-foreground">
+                                        {formatUsdPerMillion(m.input_usd_per_million)} entrada ·{" "}
+                                        {formatUsdPerMillion(m.output_usd_per_million)} saída
+                                        <span className="mt-1 block text-[10px] text-muted-foreground">
+                                          Sync automático (LiteLLM + OpenRouter)
+                                        </span>
+                                      </dd>
+                                    </div>
+                                    <div>
+                                      <dt className="text-muted-foreground">
                                         Capacidades
                                       </dt>
                                       <dd className="mt-0.5 text-foreground">
@@ -813,18 +957,25 @@ export function AdminModelsPanel() {
                 </table>
               </div>
               <p className="border-t border-border px-4 py-2 text-[11px] text-muted-foreground">
-                {filtered.length} de {tabTotal} em {tabLabel(tab)} · ordenado por{" "}
+                {filtered.length} de {tabTotal} em{" "}
+                {tab === "all" ? "Todos" : providerLabel(tab)} · ordenado por{" "}
                 {sortKey === "released_at"
                   ? "lançamento"
                   : sortKey === "input_token_limit"
                     ? "contexto"
                     : sortKey === "max_output_tokens"
                       ? "max out"
-                      : sortKey === "status"
-                        ? "status"
-                        : sortKey === "provider"
-                          ? "provedor"
-                          : "nome"}{" "}
+                      : sortKey === "cost_avg"
+                        ? "custo médio"
+                        : sortKey === "input_usd_per_million"
+                          ? "custo entrada"
+                          : sortKey === "output_usd_per_million"
+                            ? "custo saída"
+                            : sortKey === "status"
+                              ? "status"
+                              : sortKey === "provider"
+                                ? "provedor"
+                                : "nome"}{" "}
                 ({sortDir === "asc" ? "crescente" : "decrescente"}) ·{" "}
                 {tab === "all"
                   ? tabCredentialOk
@@ -836,6 +987,7 @@ export function AdminModelsPanel() {
               </p>
           </div>
         </Tabs>
+        </>
       )}
     </section>
   )

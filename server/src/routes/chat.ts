@@ -13,7 +13,14 @@ import { config } from "../config.js"
 import { streamChat, type LlmMessage } from "../llm/router.js"
 import { enabledModels } from "../llm/models.js"
 import { resolveModelForUser } from "../services/model-access.js"
-import { getEffectiveKey, isKeyProvider } from "../services/llm-keys.js"
+import { getEffectiveKey, isKeyProvider, listUserKeys } from "../services/llm-keys.js"
+import { keySourceForProvider } from "../llm/model-catalog-meta.js"
+import {
+  buildModelCreditContext,
+  modelIsAvailableWithCredit,
+  recordQuotaError,
+} from "../services/provider-credit.js"
+import { computeMessageCostUsd } from "../services/model-pricing.js"
 import { isErroSanitizado } from "../lib/erro-modelo.js"
 import { endSSE, initSSE, writeSSE, writeSSEHeartbeat } from "../lib/sse.js"
 import { DEXTER_SYSTEM_PROMPT, MULTI_AGENT_PROMPT_BLOCK } from "../llm/system-prompt.js"
@@ -343,6 +350,24 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       role,
     })
 
+    const userKeys = await listUserKeys(userId).catch(() => [])
+    const personalProviders = new Set(
+      userKeys.map((k) => k.provider),
+    )
+    const creditCtx = await buildModelCreditContext(userId, personalProviders)
+    if (!modelIsAvailableWithCredit(creditCtx, modelInfo.provider)) {
+      reply.code(402).send({
+        error: "no_credit",
+        message:
+          "Sem crédito disponível para este provider ou orçamento mensal esgotado. Escolha outro modelo ou fale com um administrador.",
+      })
+      return
+    }
+    const modelKeySource = keySourceForProvider(
+      modelInfo.provider,
+      personalProviders,
+    )
+
     // Chave efetiva deste request: pessoal do usuário (BYOK) → global → env.
     const providerApiKey = isKeyProvider(modelInfo.provider)
       ? await getEffectiveKey(modelInfo.provider, userId)
@@ -458,6 +483,14 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       const corpo =
         texto || "_(sem resposta do modelo — veja os passos desta execução)_"
       try {
+        let costUsd = await computeMessageCostUsd(
+          modelInfo.id,
+          tokensIn,
+          tokensOut,
+        )
+        if (costUsd == null && usedModel) {
+          costUsd = await computeMessageCostUsd(usedModel, tokensIn, tokensOut)
+        }
         assistantMessageId = await insertMessage({
           chatId: body.threadId,
           userId,
@@ -466,6 +499,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
           model: usedModel,
           tokensIn,
           tokensOut,
+          costUsd,
           traceId: request.traceId,
         })
       } catch (err) {
@@ -748,6 +782,14 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
           steps,
         },
         "erro no streaming do chat",
+      )
+
+      const errMsg = err instanceof Error ? err.message : String(err)
+      void recordQuotaError(
+        userId,
+        modelInfo.provider,
+        modelKeySource,
+        errMsg,
       )
 
       await persistirResposta()

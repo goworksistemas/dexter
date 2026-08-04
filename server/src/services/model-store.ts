@@ -13,6 +13,8 @@ export type ModelProvider =
   | "xai"
   | "ollama"
 
+export type ModelCostTier = "free" | "cheap" | "standard" | "premium"
+
 export interface ModelOverride {
   id: string
   enabled: boolean
@@ -20,6 +22,7 @@ export interface ModelOverride {
   label: string | null
   description: string | null
   sort_order: number | null
+  cost_tier: ModelCostTier | null
   created_at: string
   updated_at: string
 }
@@ -30,6 +33,7 @@ export interface ModelOverridePatch {
   label?: string | null
   description?: string | null
   sort_order?: number | null
+  cost_tier?: ModelCostTier | null
 }
 
 const CACHE_TTL_MS = 10_000
@@ -49,6 +53,13 @@ function normalize(raw: Record<string, unknown>): ModelOverride {
     sort_order:
       raw.sort_order != null && raw.sort_order !== ""
         ? Number(raw.sort_order)
+        : null,
+    cost_tier:
+      raw.cost_tier === "free" ||
+      raw.cost_tier === "cheap" ||
+      raw.cost_tier === "standard" ||
+      raw.cost_tier === "premium"
+        ? raw.cost_tier
         : null,
     created_at: String(raw.created_at ?? ""),
     updated_at: String(raw.updated_at ?? ""),
@@ -140,6 +151,10 @@ export async function upsertModelOverride(
       patch.sort_order !== undefined
         ? patch.sort_order
         : (existing?.sort_order ?? null),
+    cost_tier:
+      patch.cost_tier !== undefined
+        ? patch.cost_tier
+        : (existing?.cost_tier ?? null),
     updated_at: new Date().toISOString(),
   }
 

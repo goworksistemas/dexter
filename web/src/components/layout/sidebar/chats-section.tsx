@@ -2,6 +2,7 @@ import * as React from "react"
 import { MessageSquare, MoreHorizontal } from "lucide-react"
 import { Link } from "react-router-dom"
 
+import { ChatCostInfo } from "@/components/chat/cost-info"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -127,6 +128,11 @@ export function ChatsSection({
                 />
                 <span className="min-w-0 flex-1 truncate">{title}</span>
                 {running ? <RunningDots /> : null}
+                <ChatCostInfo
+                  costUsd={chat.cost_usd}
+                  compact
+                  className="opacity-100 md:opacity-0 md:group-hover/item:opacity-100"
+                />
               </button>
               <Button
                 variant="ghost"

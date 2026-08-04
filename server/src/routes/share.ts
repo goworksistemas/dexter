@@ -1,8 +1,8 @@
 /**
- * Compartilhamento público de conversas e artefatos.
+ * Compartilhamento de conversas e artefatos.
  *
- * Autenticado: publicar/revogar/consultar status (ownership obrigatório).
- * Anônimo: GET /api/public/* por token UUID (rate limit mais baixo).
+ * - Colega (chat): invite por e-mail → destinatário cria fork.
+ * - Link público: token UUID (anônimo), com aviso de dados internos na UI.
  */
 import type { FastifyInstance } from "fastify"
 import rateLimit from "@fastify/rate-limit"
@@ -19,8 +19,24 @@ import {
   revokeArtifactShare,
   revokeChatShare,
 } from "../services/share-store.js"
+import {
+  forkSharedChat,
+  inviteChatShare,
+  listChatSharesForOwner,
+  listPendingSharesForUser,
+  listShareableColleagues,
+  revokeUserShare,
+} from "../services/share-user-store.js"
 
 const tokenSchema = z.string().uuid()
+const inviteBodySchema = z
+  .object({
+    userId: z.string().uuid().optional(),
+    email: z.string().email().max(320).optional(),
+  })
+  .refine((b) => Boolean(b.userId || b.email), {
+    message: "Informe userId ou email.",
+  })
 
 export default async function shareRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: { id: string } }>(
@@ -44,6 +60,57 @@ export default async function shareRoutes(app: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const { userId } = await resolveUser(request)
       await revokeChatShare(request.params.id, userId)
+      return reply.code(204).send()
+    },
+  )
+
+  app.get<{ Params: { id: string } }>(
+    "/api/chats/:id/share-users",
+    async (request) => {
+      const { userId } = await resolveUser(request)
+      const shares = await listChatSharesForOwner(request.params.id, userId)
+      return { shares }
+    },
+  )
+
+  app.post<{ Params: { id: string } }>(
+    "/api/chats/:id/share-users",
+    async (request) => {
+      const { userId } = await resolveUser(request)
+      const body = inviteBodySchema.parse(request.body)
+      const share = await inviteChatShare(request.params.id, userId, {
+        userId: body.userId,
+        email: body.email,
+      })
+      return { share }
+    },
+  )
+
+  app.get("/api/me/colleagues", async (request) => {
+    const { userId } = await resolveUser(request)
+    const colleagues = await listShareableColleagues(userId)
+    return { colleagues }
+  })
+
+  app.get("/api/me/chat-shares", async (request) => {
+    const { userId } = await resolveUser(request)
+    const shares = await listPendingSharesForUser(userId)
+    return { shares }
+  })
+
+  app.post<{ Params: { shareId: string } }>(
+    "/api/me/chat-shares/:shareId/fork",
+    async (request) => {
+      const { userId } = await resolveUser(request)
+      return forkSharedChat(request.params.shareId, userId)
+    },
+  )
+
+  app.delete<{ Params: { shareId: string } }>(
+    "/api/me/chat-shares/:shareId",
+    async (request, reply) => {
+      const { userId } = await resolveUser(request)
+      await revokeUserShare(request.params.shareId, userId)
       return reply.code(204).send()
     },
   )

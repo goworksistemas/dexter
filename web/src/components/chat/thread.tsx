@@ -46,6 +46,7 @@ import { toast } from "sonner"
 import { ARTIFACT_SPLIT_QUERY } from "@/components/artifacts/artifact-panel"
 import { AgentActivity } from "@/components/chat/agent-progress"
 import { ComposerPlusMenu } from "@/components/chat/composer-plus-menu"
+import { MessageCostInfo } from "@/components/chat/cost-info"
 import { ImageGenPlaceholder } from "@/components/chat/image-gen-placeholder"
 import { Markdown } from "@/components/chat/markdown"
 import { ModelSelector } from "@/components/chat/model-selector"
@@ -893,6 +894,28 @@ function MessageBubble({
                 Tentar novamente
               </button>
             )}
+            <MessageCostInfo
+              costUsd={
+                typeof message.metadata?.custom?.cost_usd === "number"
+                  ? message.metadata.custom.cost_usd
+                  : null
+              }
+              tokensIn={
+                typeof message.metadata?.custom?.tokens_in === "number"
+                  ? message.metadata.custom.tokens_in
+                  : null
+              }
+              tokensOut={
+                typeof message.metadata?.custom?.tokens_out === "number"
+                  ? message.metadata.custom.tokens_out
+                  : null
+              }
+              model={
+                typeof message.metadata?.custom?.model === "string"
+                  ? message.metadata.custom.model
+                  : null
+              }
+            />
           </div>
         )}
         {canRetry && (streaming || texto.length === 0) && (

@@ -1,5 +1,6 @@
 import * as React from "react"
-import { useLocation, useNavigate } from "react-router-dom"
+import { Share2 } from "lucide-react"
+import { Link, useLocation, useNavigate } from "react-router-dom"
 import { toast } from "sonner"
 
 import { ChatActionsOverlays } from "@/components/chat/chat-actions"
@@ -7,15 +8,53 @@ import { useMediaQuery } from "@/hooks/use-media-query"
 import { useSidebar } from "@/hooks/use-sidebar"
 import { useChatActions, useChatRuns, useChats } from "@/lib/chats"
 import { useAuth } from "@/providers/auth-provider"
+import { fetchPendingChatShares } from "@/lib/share/api"
+import { cn } from "@/lib/utils"
 
 import { ChatsSection } from "./chats-section"
-import { isNewChatShortcut } from "./helpers"
+import { isNewChatShortcut, sidebarRowClass } from "./helpers"
 import { SidebarFooter } from "./sidebar-footer"
 import { SidebarHeader } from "./sidebar-header"
 import { SidebarNav } from "./sidebar-nav"
 import { SidebarRail } from "./sidebar-rail"
 import { SidebarSearch } from "./sidebar-search"
 import { SidebarShell } from "./sidebar-shell"
+
+function PendingSharesSidebarHint({ onNavigate }: { onNavigate: () => void }) {
+  const [count, setCount] = React.useState(0)
+
+  React.useEffect(() => {
+    let cancelled = false
+    void fetchPendingChatShares()
+      .then((shares) => {
+        if (!cancelled) setCount(shares.length)
+      })
+      .catch(() => {
+        if (!cancelled) setCount(0)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (count <= 0) return null
+
+  return (
+    <Link
+      to="/chats"
+      onClick={onNavigate}
+      className={cn(
+        sidebarRowClass,
+        "mb-1 text-violet-800 dark:text-violet-200",
+      )}
+    >
+      <Share2 className="size-4 shrink-0" aria-hidden />
+      <span className="min-w-0 flex-1 truncate">
+        {count === 1 ? "1 conversa compartilhada" : `${count} compartilhadas`}
+      </span>
+    </Link>
+  )
+}
 
 /** Quantas conversas cabem na lista antes do "Ver todos". */
 const RECENT_LIMIT = 15
@@ -174,6 +213,7 @@ export function Sidebar() {
             />
 
             <div className="scroll-thin min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-2 pt-1 pb-3">
+              <PendingSharesSidebarHint onNavigate={closeOnMobile} />
               <ChatsSection
                 chats={visibleChats}
                 total={filteredChats.length}
@@ -216,6 +256,10 @@ export function Sidebar() {
         moveDialog={chatActions.moveDialog}
         onMoveDialogOpenChange={(open) =>
           chatActions.setMoveDialog((prev) => ({ ...prev, open }))
+        }
+        shareDialog={chatActions.shareDialog}
+        onShareDialogOpenChange={(open) =>
+          chatActions.setShareDialog((prev) => ({ ...prev, open }))
         }
       />
     </>

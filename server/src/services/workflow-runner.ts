@@ -28,6 +28,7 @@ import { accessSummary, resolveAccess, type SystemAccess } from "../systems/acce
 import { auditToolCalls } from "../systems/audit.js"
 import { runOpenAiAgentLoop } from "../systems/openai-agent-loop.js"
 import { insertMessage, upsertChat } from "./chat-store.js"
+import { computeMessageCostUsd } from "./model-pricing.js"
 import {
   createRun,
   finishRun,
@@ -306,6 +307,11 @@ export async function runWorkflow(
     const conteudo =
       resultado.texto.trim() ||
       "_(a execução terminou sem texto do modelo — veja os passos)_"
+    const costUsd = await computeMessageCostUsd(
+      modelInfo.id,
+      resultado.tokensIn,
+      resultado.tokensOut,
+    )
     const messageId = await insertMessage({
       chatId,
       userId: workflow.user_id,
@@ -314,6 +320,7 @@ export async function runWorkflow(
       model: resultado.model,
       tokensIn: resultado.tokensIn,
       tokensOut: resultado.tokensOut,
+      costUsd,
     })
 
     if (resultado.toolCalls.length > 0) {

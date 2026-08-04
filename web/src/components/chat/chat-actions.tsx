@@ -240,6 +240,8 @@ export function ChatHeaderTitle({
   )
 }
 
+const EMPTY_SHARE = { open: false, chatId: null as string | null }
+
 /** Portal de menu de contexto + dialog de mover conversa. */
 export function ChatActionsOverlays({
   chatMenu,
@@ -247,16 +249,16 @@ export function ChatActionsOverlays({
   actionsForMenu,
   moveDialog,
   onMoveDialogOpenChange,
-  shareDialog,
-  onShareDialogOpenChange,
+  shareDialog = EMPTY_SHARE,
+  onShareDialogOpenChange = () => {},
 }: {
   chatMenu: ChatMenuState | null
   onCloseChatMenu: () => void
   actionsForMenu: ChatActionHandlers | null
   moveDialog: MoveDialogState
   onMoveDialogOpenChange: (open: boolean) => void
-  shareDialog: { open: boolean; chatId: string | null }
-  onShareDialogOpenChange: (open: boolean) => void
+  shareDialog?: { open: boolean; chatId: string | null }
+  onShareDialogOpenChange?: (open: boolean) => void
 }) {
   return (
     <>

@@ -11,6 +11,8 @@ export interface ChatSummary {
   updated_at: string
   /** Modelo pinado nesta conversa (id do catálogo) — null segue o default. */
   model: string | null
+  /** Soma do custo das mensagens (USD). */
+  cost_usd?: number
 }
 
 export interface ChatMessageRecord {
@@ -18,4 +20,8 @@ export interface ChatMessageRecord {
   role: ChatRole
   content: string
   created_at: string
+  model?: string | null
+  tokens_in?: number | null
+  tokens_out?: number | null
+  cost_usd?: number | null
 }

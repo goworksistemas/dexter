@@ -33,6 +33,7 @@ export interface AdminDayStat {
   assistant_messages?: number
   tokens: number
   active_users?: number
+  cost_usd?: number
 }
 
 export interface AdminOverview {
@@ -62,6 +63,7 @@ export interface AdminOverview {
     chats: number
     messages: number
     tokens: number
+    cost_usd?: number
   }>
 }
 
@@ -73,6 +75,7 @@ export interface AdminUserChat {
   updated_at: string
   message_count: number
   tokens: number
+  cost_usd_period?: number
   last_model: string | null
 }
 
@@ -86,6 +89,7 @@ export interface AdminUserDetail {
     avatar_url: string | null
     role: DexterRole
     disabled_at: string | null
+    usage_budget_usd?: number | null
     created_at: string
     updated_at: string
   }
@@ -194,6 +198,99 @@ export async function fetchAdminUserDetail(
   return res.json()
 }
 
+export async function fetchAdminCostCenter(days = 30): Promise<{
+  costCenter: AdminCostCenter
+  actorRole: DexterRole
+}> {
+  const res = await fetch(`${BASE}/cost-center?days=${days}`, {
+    headers: await authHeaders(),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(res, `GET /api/admin/cost-center → ${res.status}`),
+    )
+  }
+  return res.json()
+}
+
+export interface AdminCostCenter {
+  period_days: number
+  since: string
+  month_start: string
+  totals: {
+    active_users: number
+    chats: number
+    messages: number
+    tokens: number
+    cost_usd: number
+  }
+  by_user: Array<{
+    user_id: string
+    email: string | null
+    full_name: string | null
+    role: DexterRole
+    usage_budget_usd: number | null
+    cost_usd_month: number
+    chats: number
+    messages: number
+    tokens: number
+    cost_usd: number
+  }>
+  by_chat: Array<{
+    chat_id: string
+    title: string | null
+    user_id: string
+    email: string | null
+    full_name: string | null
+    messages: number
+    tokens: number
+    cost_usd: number
+    last_at: string
+  }>
+  by_model: AdminModelStat[]
+  by_provider: Array<{
+    provider: string
+    messages: number
+    tokens: number
+    cost_usd: number
+  }>
+  by_day: AdminDayStat[]
+  pricing: Array<{
+    id: string
+    input_usd_per_million: number | null
+    output_usd_per_million: number | null
+    updated_at: string
+  }>
+  providers: Array<{
+    id: string
+    label: string
+    default_cost_tier: string | null
+    credit_status: string
+    balance_usd: number | null
+    low_threshold_usd: number | null
+    balance_updated_at: string | null
+  }>
+}
+
+export async function patchAdminPricing(
+  id: string,
+  patch: {
+    input_usd_per_million?: number | null
+    output_usd_per_million?: number | null
+  },
+): Promise<void> {
+  const res = await fetch(`${BASE}/pricing/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: await authHeaders(),
+    body: JSON.stringify(patch),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(res, `PATCH /api/admin/pricing/${id} → ${res.status}`),
+    )
+  }
+}
+
 export async function patchAdminUser(
   id: string,
   patch: {
@@ -201,6 +298,7 @@ export async function patchAdminUser(
     disabled?: boolean
     /** null = liberar todos os modelos; array = restringir a estes ids. */
     allowed_models?: string[] | null
+    usage_budget_usd?: number | null
   },
 ): Promise<AdminUserRow> {
   const res = await fetch(`${BASE}/users/${id}`, {
@@ -248,14 +346,30 @@ export interface AdminCatalogModel {
   released_at?: string | null
   credential_ok: boolean
   latency_ms?: number | null
+  input_usd_per_million?: number | null
+  output_usd_per_million?: number | null
+  provider_label?: string
 }
 
-export async function fetchAdminModels(): Promise<{
+export interface AdminProviderMeta {
+  id: string
+  label: string
+  credit_status?: "available" | "low" | "depleted" | "unknown"
+  balance_usd?: number | null
+  low_threshold_usd?: number | null
+}
+
+export async function fetchAdminModels(opts?: {
+  probe?: boolean
+}): Promise<{
   models: AdminCatalogModel[]
   providers?: Record<string, { credential: boolean }>
+  provider_meta?: AdminProviderMeta[]
   actorRole: DexterRole
 }> {
-  const res = await fetch(`${BASE}/models`, { headers: await authHeaders() })
+  const probe = opts?.probe === true
+  const qs = probe ? "?probe=1" : ""
+  const res = await fetch(`${BASE}/models${qs}`, { headers: await authHeaders() })
   if (!res.ok) {
     throw new Error(
       await parseError(res, `GET /api/admin/models → ${res.status}`),
@@ -308,6 +422,29 @@ export async function bulkPatchAdminModels(
     )
   }
   return res.json()
+}
+
+export async function patchAdminProvider(
+  id: string,
+  patch: {
+    label?: string
+    credit_status?: "available" | "low" | "depleted" | "unknown"
+    balance_usd?: number | null
+    low_threshold_usd?: number | null
+  },
+): Promise<AdminProviderMeta> {
+  const res = await fetch(`${BASE}/providers/${id}`, {
+    method: "PATCH",
+    headers: await authHeaders(),
+    body: JSON.stringify(patch),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(res, `PATCH /api/admin/providers/${id} → ${res.status}`),
+    )
+  }
+  const body = (await res.json()) as { provider: AdminProviderMeta }
+  return body.provider
 }
 
 // --- Chaves de API globais dos provedores (banco, cifradas) -----------------

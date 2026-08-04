@@ -2,15 +2,26 @@
  * Catálogo DINÂMICO de modelos — descoberto nas APIs dos providers.
  * Chaves vêm do banco (painel admin) com env como fallback (services/llm-keys).
  * Admin só guarda overrides (hide/default/rótulo).
- * Descrição, tokens e capabilities: só o que a API informar (senão vazio/null).
+ * Descrição, tokens e capabilities: API do provider primeiro; buracos
+ * preenchidos com LiteLLM/OpenRouter (sem hardcode por modelo).
  */
 import { config } from "../config.js"
 import { getGlobalKey, type KeyProvider } from "../services/llm-keys.js"
 import {
   listModelOverrides,
+  type ModelCostTier,
   type ModelOverride,
   type ModelProvider,
 } from "../services/model-store.js"
+import {
+  ensureProvidersDiscovered,
+  providerMetaMap,
+} from "../services/provider-meta-store.js"
+import { ensureModelPricingRows, enrichModelsWithPricing } from "../services/model-pricing.js"
+import {
+  enrichDiscoveredFromPublicCatalog,
+  syncCatalogPricing,
+} from "../services/pricing-sync.js"
 import {
   capabilityTraits,
   emptyCapabilities,
@@ -40,6 +51,11 @@ export interface ModelInfo {
   enabled: boolean
   isDefault: boolean
   sortOrder: number
+  /** Rótulo do provider (dexter_providers.label). */
+  providerLabel: string
+  /** USD por 1M tokens (sync automático). */
+  inputUsdPerMillion?: number | null
+  outputUsdPerMillion?: number | null
 }
 
 export interface ProbedModel extends ModelInfo {
@@ -619,6 +635,7 @@ async function discoverOllama(): Promise<Discovered[]> {
 function applyOverrides(
   discovered: Discovered[],
   overrides: ModelOverride[],
+  providers: Map<string, { label: string; default_cost_tier: ModelCostTier | null }>,
 ): ProbedModel[] {
   const byId = new Map(overrides.map((o) => [o.id, o]))
   const models: ProbedModel[] = []
@@ -629,6 +646,7 @@ function applyOverrides(
     const ovLegacy = byId.get(d.model)
     const override = ov ?? ovLegacy
     const enabled = override?.enabled ?? true
+    const prov = providers.get(d.provider)
     models.push({
       id,
       label: override?.label?.trim() || d.label,
@@ -643,6 +661,7 @@ function applyOverrides(
       enabled,
       isDefault: Boolean(override?.is_default),
       sortOrder: override?.sort_order ?? 1000,
+      providerLabel: prov?.label ?? d.provider,
       available: enabled,
       latencyMs: d.latencyMs,
       credentialOk: true,
@@ -688,7 +707,7 @@ async function discoverCatalog(): Promise<ProbedModel[]> {
       getGlobalKey("xai"),
     ])
   const nada = Promise.resolve([] as Discovered[])
-  const [anthropic, openai, gemini, deepseek, xai, ollama, overrides] =
+  const [anthropic, openai, gemini, deepseek, xai, ollama] =
     await Promise.all([
       anthropicKey ? discoverAnthropic(anthropicKey) : nada,
       openaiKey ? discoverOpenAI(openaiKey) : nada,
@@ -710,7 +729,6 @@ async function discoverCatalog(): Promise<ProbedModel[]> {
           )
         : nada,
       config.OLLAMA_BASE_URL ? discoverOllama() : nada,
-      listModelOverrides().catch(() => [] as ModelOverride[]),
     ])
 
   const discovered = [
@@ -721,9 +739,47 @@ async function discoverCatalog(): Promise<ProbedModel[]> {
     ...xai,
     ...ollama,
   ]
-  const models = applyOverrides(discovered, overrides)
-  catalogCache = { at: Date.now(), models }
-  return models
+  await ensureProvidersDiscovered(
+    discovered.filter((d) => d.ok && d.model !== "_error").map((d) => d.provider),
+  )
+  const catalogRefs = discovered
+    .filter((d) => d.ok && d.model !== "_error")
+    .map((d) => ({
+      id: `${d.provider}:${d.model}`,
+      provider: d.provider,
+      model: d.model,
+    }))
+  await ensureModelPricingRows(catalogRefs.map((c) => c.id)).catch(() => {})
+  // LiteLLM/OpenRouter: contexto, max out, data e descrição onde a API falha.
+  const enriched = (
+    await enrichDiscoveredFromPublicCatalog(discovered).catch(() => discovered)
+  ).map((d) =>
+    d.ok && d.model !== "_error"
+      ? { ...d, traits: capabilityTraits(d.capabilities) }
+      : d,
+  )
+  // Preços em background — não bloqueia o catálogo se o feed estiver lento.
+  void syncCatalogPricing(catalogRefs).catch(() => {})
+  const [overrides, providers] = await Promise.all([
+    listModelOverrides().catch(() => [] as ModelOverride[]),
+    providerMetaMap(),
+  ])
+  const providerDefaults = new Map(
+    [...providers.entries()].map(([id, p]) => [
+      id,
+      { label: p.label, default_cost_tier: p.default_cost_tier },
+    ]),
+  )
+  const models = applyOverrides(enriched, overrides, providerDefaults)
+  const priced = await enrichModelsWithPricing(models).catch(() =>
+    models.map((m) => ({
+      ...m,
+      inputUsdPerMillion: null,
+      outputUsdPerMillion: null,
+    })),
+  )
+  catalogCache = { at: Date.now(), models: priced }
+  return priced
 }
 
 export async function loadCatalog(force = false): Promise<ModelInfo[]> {

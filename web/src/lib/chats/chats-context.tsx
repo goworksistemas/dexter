@@ -98,16 +98,25 @@ const ChatsContext = React.createContext<ChatsContextValue | null>(null)
 function paraThreadMessageLike(msg: ChatMessageRecord): ThreadMessageLike {
   const content =
     msg.role === "user" ? stripArtifactAppendix(msg.content) : msg.content
+  const custom: Record<string, unknown> = {}
+  if (msg.cost_usd != null) custom.cost_usd = msg.cost_usd
+  if (msg.tokens_in != null) custom.tokens_in = msg.tokens_in
+  if (msg.tokens_out != null) custom.tokens_out = msg.tokens_out
+  if (msg.model) custom.model = msg.model
   return {
     id: msg.id,
     role: msg.role,
     content,
     createdAt: msg.created_at ? new Date(msg.created_at) : undefined,
+    ...(Object.keys(custom).length > 0
+      ? { metadata: { custom } }
+      : {}),
   }
 }
 
 /** Mensagem já na thread → ThreadMessageLike (partes achatadas em texto). */
 function paraMensagemLocal(msg: ThreadMessage): ThreadMessageLike {
+  const custom = msg.metadata?.custom
   return {
     id: msg.id,
     role: msg.role,
@@ -115,6 +124,9 @@ function paraMensagemLocal(msg: ThreadMessage): ThreadMessageLike {
       .map((part) => (part.type === "text" ? part.text : ""))
       .join(""),
     createdAt: msg.createdAt,
+    ...(custom && Object.keys(custom).length > 0
+      ? { metadata: { custom } }
+      : {}),
   }
 }
 
@@ -763,6 +775,8 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
           if (chatRunsStore.getRun(id)) {
             chatRunsStore.discardRun(id)
           }
+          // Atualiza custo agregado na sidebar / lista de chats.
+          refreshChats()
         })
         .catch((err) => {
           if (requestId !== historyRequestRef.current) return
@@ -775,7 +789,7 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
           recarregarTudo()
         })
     },
-    [loadHistory],
+    [loadHistory, refreshChats],
   )
 
   const routeChatId = parseChatRoute(location.pathname).chatId
