@@ -360,6 +360,30 @@ export async function getMessagesPage(
   return { messages: rows, hasMore }
 }
 
+/** Cauda default — cobre o par user+assistant do último run com folga. */
+const TAIL_DEFAULT_LIMIT = 8
+/** Acima disso a "cauda" já é histórico — use getMessagesPage. */
+export const TAIL_MAX_LIMIT = 40
+
+/**
+ * Só o "rabo" da conversa: as últimas `limit` mensagens (ordem cronológica) e
+ * `hasMore` = ainda existe histórico antes disso. Serve para ressincronizar
+ * ids depois de um run (ou saber se o chat é novo) sem baixar a janela toda.
+ * Delega em getMessagesPage sem cursor — mesma query e mesma migração de
+ * imagens `data:` que getMessages faz.
+ */
+export async function getChatTail(
+  chatId: string,
+  userId: string,
+  opts: { limit?: number } = {},
+): Promise<MessagesPage> {
+  const limit = Math.min(
+    Math.max(opts.limit ?? TAIL_DEFAULT_LIMIT, 1),
+    TAIL_MAX_LIMIT,
+  )
+  return getMessagesPage(chatId, userId, { limit })
+}
+
 /** Renomeia um chat do próprio usuário. Chat inexistente → null. */
 export async function renameChat(
   chatId: string,

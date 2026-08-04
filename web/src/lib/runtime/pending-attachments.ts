@@ -166,6 +166,9 @@ export interface SentAttachmentsController {
   /** Chamado pelo adapter (via ref) logo após anexar os pendentes à última
    * mensagem do usuário. */
   registrar: (messageId: string, attachments: ChatAttachment[]) => void
+  /** Re-chaveia os registros quando a reconciliação com o banco troca os ids
+   * locais pelos uuids do Postgres — senão os chips somem da bolha. */
+  remapear: (pares: ReadonlyArray<readonly [string, string]>) => void
 }
 
 export function useSentAttachments(): SentAttachmentsController {
@@ -175,5 +178,23 @@ export function useSentAttachments(): SentAttachmentsController {
     setPorMensagem((prev) => ({ ...prev, [messageId]: attachments }))
   }, [])
 
-  return { porMensagem, registrar }
+  const remapear = useCallback(
+    (pares: ReadonlyArray<readonly [string, string]>) => {
+      setPorMensagem((prev) => {
+        let mudou = false
+        const next = { ...prev }
+        for (const [antigo, novo] of pares) {
+          const anexos = next[antigo]
+          if (!anexos || antigo === novo) continue
+          delete next[antigo]
+          next[novo] = anexos
+          mudou = true
+        }
+        return mudou ? next : prev
+      })
+    },
+    [],
+  )
+
+  return { porMensagem, registrar, remapear }
 }

@@ -55,6 +55,60 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/** Servidor pendurado não pode deixar o histórico carregando pra sempre. */
+const HISTORY_TIMEOUT_MS = 15_000
+
+class HistoryTimeoutError extends Error {
+  constructor() {
+    super(
+      "O servidor não respondeu em 15s. Verifique a conexão e tente novamente.",
+    )
+    this.name = "HistoryTimeoutError"
+  }
+}
+
+interface SignalComTimeout {
+  signal: AbortSignal
+  /** Solta o timer/listener pendente — chamar no `finally` do fetch. */
+  dispose: () => void
+}
+
+/**
+ * Signal do chamador + corte em `ms`. Onde `AbortSignal.any` não existe
+ * (Safari 16.x, Firefox < 124) o combinador é feito na mão: devolver só o
+ * signal do chamador deixava o histórico "Carregando" para sempre, que é
+ * exatamente o que o timeout existe para evitar.
+ */
+function comTimeout(
+  signal: AbortSignal | undefined,
+  ms: number,
+): SignalComTimeout {
+  if (signal && typeof AbortSignal.any === "function") {
+    return {
+      signal: AbortSignal.any([signal, AbortSignal.timeout(ms)]),
+      dispose: () => {},
+    }
+  }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException("signal timed out", "TimeoutError"))
+  }, ms)
+  const onAbort = () => controller.abort(signal?.reason)
+  if (signal) {
+    if (signal.aborted) onAbort()
+    else signal.addEventListener("abort", onAbort)
+  }
+
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer)
+      signal?.removeEventListener("abort", onAbort)
+    },
+  }
+}
+
 /** Retry em boot (web sobe antes do AgentCore) e hiccups de rede. */
 export async function fetchChatMessagesWithRetry(
   chatId: string,
@@ -70,6 +124,8 @@ export async function fetchChatMessagesWithRetry(
       lastError = err
       if (err instanceof DOMException && err.name === "AbortError") throw err
       if (err instanceof Error && /aborted|AbortError/i.test(err.message)) throw err
+      // Insistir num servidor pendurado só prolonga o loading.
+      if (err instanceof HistoryTimeoutError) throw err
       if (i === attempts - 1) break
       await sleep(250 * 2 ** i)
     }
@@ -90,19 +146,63 @@ export async function fetchChatMessages(
   params.set("limit", String(normalized.limit ?? 40))
   if (normalized.before) params.set("before", normalized.before)
 
-  const response = await fetch(
-    `${BASE_URL}/chats/${chatId}/messages?${params}`,
-    {
-      headers: await authHeaders(),
-      signal: normalized.signal,
-    },
-  )
-  if (!response.ok) {
-    throw new Error(
-      `GET /api/chats/${chatId}/messages respondeu ${response.status} ${response.statusText}`,
+  const timeout = comTimeout(normalized.signal, HISTORY_TIMEOUT_MS)
+  try {
+    const response = await fetch(
+      `${BASE_URL}/chats/${chatId}/messages?${params}`,
+      {
+        headers: await authHeaders(),
+        signal: timeout.signal,
+      },
     )
+    if (!response.ok) {
+      throw new Error(
+        `GET /api/chats/${chatId}/messages respondeu ${response.status} ${response.statusText}`,
+      )
+    }
+    return await response.json()
+  } catch (err) {
+    // Abort do chamador (troca de conversa) segue como está; só o timeout
+    // vira mensagem amigável para o `historyError`.
+    if (
+      !normalized.signal?.aborted &&
+      err instanceof DOMException &&
+      err.name === "TimeoutError"
+    ) {
+      throw new HistoryTimeoutError()
+    }
+    throw err
+  } finally {
+    timeout.dispose()
   }
-  return response.json()
+}
+
+/**
+ * Cauda da conversa (`GET /api/chats/:id/tail?limit=`): últimas mensagens +
+ * `hasMore`. Barato — usado para reconciliar ids depois de um run sem baixar
+ * o histórico inteiro. Sem retry: quem chama cai no reload completo se falhar.
+ */
+export async function fetchChatTail(
+  chatId: string,
+  opts: { signal?: AbortSignal; limit?: number } = {},
+): Promise<ChatMessagesPage> {
+  const query =
+    opts.limit !== undefined ? `?limit=${encodeURIComponent(opts.limit)}` : ""
+  const timeout = comTimeout(opts.signal, HISTORY_TIMEOUT_MS)
+  try {
+    const response = await fetch(`${BASE_URL}/chats/${chatId}/tail${query}`, {
+      headers: await authHeaders(),
+      signal: timeout.signal,
+    })
+    if (!response.ok) {
+      throw new Error(
+        `GET /api/chats/${chatId}/tail respondeu ${response.status} ${response.statusText}`,
+      )
+    }
+    return await response.json()
+  } finally {
+    timeout.dispose()
+  }
 }
 
 export interface ChatStepsRecord {

@@ -12,6 +12,25 @@
       rel="stylesheet"
     />
     <title>Dexter</title>
+    <meta name="theme-color" content="#eef2f9" />
+    <!-- Bootstrap de tema: aplica `.dark` antes do primeiro paint para evitar
+         flash claro no reload (mesma chave do ThemeProvider: dexter-theme). -->
+    <script>
+      try {
+        var t = localStorage.getItem("dexter-theme")
+        var dark =
+          t === "dark" ||
+          ((!t || t === "system") &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches)
+        if (dark) {
+          document.documentElement.classList.add("dark")
+          var m = document.querySelector('meta[name="theme-color"]')
+          if (m) m.setAttribute("content", "#0a0d0f")
+        }
+      } catch (e) {
+        /* localStorage indisponível — segue no tema claro */
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

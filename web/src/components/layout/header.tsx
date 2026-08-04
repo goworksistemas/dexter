@@ -1,3 +1,4 @@
+import * as React from "react"
 import { Menu, Monitor, Moon, Sun } from "lucide-react"
 import { Link, useLocation } from "react-router-dom"
 
@@ -6,7 +7,8 @@ import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useSidebar } from "@/hooks/use-sidebar"
@@ -16,12 +18,16 @@ import { updateProfileTheme } from "@/lib/supabase"
 import { useAuth } from "@/providers/auth-provider"
 import { useTheme, type Theme } from "@/providers/theme-provider"
 
-const PAGE_TITLES: Record<string, string> = {
-  "/chats": "Conversas",
-  "/projects": "Projetos",
-  "/artifacts": "Artefatos",
-  "/settings": "Configurações",
-}
+/**
+ * Rotas que já renderizam o próprio H1 no corpo da página — o header não
+ * repete o título (evitava dois <h1> concorrentes por rota).
+ */
+const OWN_HEADING_ROUTES = new Set([
+  "/chats",
+  "/projects",
+  "/artifacts",
+  "/settings",
+])
 
 /**
  * Header da área principal: contexto da rota atual + ferramentas do chat.
@@ -30,7 +36,7 @@ const PAGE_TITLES: Record<string, string> = {
  */
 export function Header() {
   const { theme, setTheme } = useTheme()
-  const { toggle } = useSidebar()
+  const { open: drawerOpen, toggle } = useSidebar()
   const { activeChat } = useChats()
   const chatActions = useChatActions()
   const { projects, activeProject } = useProjects()
@@ -41,9 +47,25 @@ export function Header() {
   const detailProject = projectDetailId
     ? projects.find((p) => p.id === projectDetailId)
     : undefined
-  const pageTitle = PAGE_TITLES[pathname]
+  const hasOwnHeading = OWN_HEADING_ROUTES.has(pathname)
+
+  const menuButtonRef = React.useRef<HTMLButtonElement>(null)
+  const drawerWasOpenRef = React.useRef(false)
+
+  // Drawer fechou: o foco volta pro botão que o abriu (não fica no vazio).
+  React.useEffect(() => {
+    if (drawerOpen) {
+      drawerWasOpenRef.current = true
+      return
+    }
+    if (!drawerWasOpenRef.current) return
+    drawerWasOpenRef.current = false
+    menuButtonRef.current?.focus()
+  }, [drawerOpen])
 
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor
+  const themeLabel =
+    theme === "dark" ? "escuro" : theme === "light" ? "claro" : "sistema"
 
   const handleTheme = (next: Theme) => {
     setTheme(next)
@@ -68,10 +90,12 @@ export function Header() {
     <header className="flex h-14 shrink-0 items-center justify-between gap-2 px-3 sm:px-4">
       <div className="flex min-w-0 items-center gap-1.5">
         <Button
+          ref={menuButtonRef}
           variant="ghost"
           size="icon-sm"
           className="-ml-1 shrink-0 md:hidden"
           aria-label="Abrir menu de conversas"
+          aria-expanded={drawerOpen}
           onClick={toggle}
         >
           <Menu className="size-5" />
@@ -95,11 +119,7 @@ export function Header() {
               {detailProject?.name ?? "Projeto"}
             </span>
           </nav>
-        ) : pageTitle ? (
-          <h1 className="truncate text-sm font-medium text-foreground/90">
-            {pageTitle}
-          </h1>
-        ) : activeChat ? (
+        ) : hasOwnHeading ? null : activeChat ? (
           <ChatHeaderTitle
             title={chatTitle}
             subtitle={activeProject?.name}
@@ -132,23 +152,32 @@ export function Header() {
       <div className="flex shrink-0 items-center gap-1">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" aria-label="Alternar tema">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Tema: ${themeLabel}`}
+            >
               <ThemeIcon className="size-4" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={() => handleTheme("light")}>
-              <Sun className="size-4" />
-              Claro
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => handleTheme("dark")}>
-              <Moon className="size-4" />
-              Escuro
-            </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => handleTheme("system")}>
-              <Monitor className="size-4" />
-              Sistema
-            </DropdownMenuItem>
+            <DropdownMenuRadioGroup
+              value={theme}
+              onValueChange={(value) => handleTheme(value as Theme)}
+            >
+              <DropdownMenuRadioItem value="light">
+                <Sun className="size-4" />
+                Claro
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="dark">
+                <Moon className="size-4" />
+                Escuro
+              </DropdownMenuRadioItem>
+              <DropdownMenuRadioItem value="system">
+                <Monitor className="size-4" />
+                Sistema
+              </DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

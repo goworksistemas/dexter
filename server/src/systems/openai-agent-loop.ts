@@ -258,6 +258,7 @@ export async function runOpenAiAgentLoop(
             email: opts.email,
             access: opts.access,
             connectors: opts.connectors,
+            signal: opts.signal,
           })
           const vazio =
             exec.ok &&

@@ -1,6 +1,8 @@
 /**
  * Persistência de artefatos via Supabase (RLS em agent_artifacts).
  */
+import type { SupabaseClient } from "@supabase/supabase-js"
+
 import { supabase } from "@/lib/supabase/client"
 import type { AgentArtifact, ArtifactKind } from "./types"
 
@@ -45,20 +47,25 @@ export async function fetchArtifactById(
 
 export async function fetchArtifactsForChat(
   chatId: string,
+  signal?: AbortSignal,
 ): Promise<AgentArtifact[]> {
   if (!supabase) return []
-  const { data, error } = await supabase
+  let query = supabase
     .from("agent_artifacts")
     .select(SELECT_COLS)
     .eq("chat_id", chatId)
     .order("updated_at", { ascending: false })
+  if (signal) query = query.abortSignal(signal)
 
+  const { data, error } = await query
   if (error && isMissingTruncatedColumn(error.message)) {
-    const legacy = await supabase
+    let legacyQ = supabase
       .from("agent_artifacts")
       .select(SELECT_COLS_LEGACY)
       .eq("chat_id", chatId)
       .order("updated_at", { ascending: false })
+    if (signal) legacyQ = legacyQ.abortSignal(signal)
+    const legacy = await legacyQ
     if (legacy.error) throw new Error(legacy.error.message)
     return ((legacy.data ?? []) as AgentArtifact[]).map(normalize)
   }
@@ -94,7 +101,7 @@ export async function fetchArtifactsForUser(
   return ((data ?? []) as AgentArtifact[]).map(normalize)
 }
 
-export async function upsertArtifact(params: {
+export interface UpsertArtifactInput {
   chatId: string
   sourceKey: string
   kind: ArtifactKind
@@ -102,88 +109,123 @@ export async function upsertArtifact(params: {
   content: string
   messageId?: string | null
   isTruncated?: boolean
-}): Promise<AgentArtifact> {
-  if (!supabase) throw new Error("Supabase não configurado.")
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) throw new Error("Sessão inválida.")
+}
 
-  const { data: existing, error: readErr } = await supabase
+/** Violação da unique (chat_id, source_key) — dois inserts concorrentes. */
+function isUniqueViolation(error: { code?: string; message?: string }): boolean {
+  return (
+    error.code === "23505" ||
+    /duplicate key|already exists/i.test(error.message ?? "")
+  )
+}
+
+async function readArtifactRow(
+  db: SupabaseClient,
+  chatId: string,
+  sourceKey: string,
+): Promise<{ id: string; version: number } | null> {
+  const { data, error } = await db
     .from("agent_artifacts")
     .select("id, version")
-    .eq("chat_id", params.chatId)
-    .eq("source_key", params.sourceKey)
+    .eq("chat_id", chatId)
+    .eq("source_key", sourceKey)
     .maybeSingle()
+  if (error) throw new Error(error.message)
+  return (data as { id: string; version: number } | null) ?? null
+}
 
-  if (readErr) throw new Error(readErr.message)
-
-  const isTruncated = Boolean(params.isTruncated)
-
+async function updateArtifactRow(
+  db: SupabaseClient,
+  existing: { id: string; version: number },
+  params: UpsertArtifactInput,
+): Promise<AgentArtifact> {
   const baseUpdate = {
     content: params.content,
     title: params.title,
     kind: params.kind,
     message_id: params.messageId ?? null,
-    version: (existing?.version ?? 1) + (existing?.id ? 1 : 0),
+    version: (existing.version ?? 1) + 1,
   }
 
-  if (existing?.id) {
-    const { data, error } = await supabase
-      .from("agent_artifacts")
-      .update({ ...baseUpdate, is_truncated: isTruncated })
-      .eq("id", existing.id)
-      .select(SELECT_COLS)
-      .single()
-    if (error && isMissingTruncatedColumn(error.message)) {
-      const legacy = await supabase
-        .from("agent_artifacts")
-        .update(baseUpdate)
-        .eq("id", existing.id)
-        .select(SELECT_COLS_LEGACY)
-        .single()
-      if (legacy.error) throw new Error(legacy.error.message)
-      return normalize(legacy.data as AgentArtifact)
-    }
-    if (error) throw new Error(error.message)
-    return normalize(data as AgentArtifact)
-  }
-
-  const { data, error } = await supabase
+  const { data, error } = await db
     .from("agent_artifacts")
-    .insert({
-      chat_id: params.chatId,
-      user_id: user.id,
-      source_key: params.sourceKey,
-      kind: params.kind,
-      title: params.title,
-      content: params.content,
-      message_id: params.messageId ?? null,
-      version: 1,
-      is_truncated: isTruncated,
-    })
+    .update({ ...baseUpdate, is_truncated: Boolean(params.isTruncated) })
+    .eq("id", existing.id)
     .select(SELECT_COLS)
     .single()
-
   if (error && isMissingTruncatedColumn(error.message)) {
-    const legacy = await supabase
+    const legacy = await db
       .from("agent_artifacts")
-      .insert({
-        chat_id: params.chatId,
-        user_id: user.id,
-        source_key: params.sourceKey,
-        kind: params.kind,
-        title: params.title,
-        content: params.content,
-        message_id: params.messageId ?? null,
-        version: 1,
-      })
+      .update(baseUpdate)
+      .eq("id", existing.id)
       .select(SELECT_COLS_LEGACY)
       .single()
     if (legacy.error) throw new Error(legacy.error.message)
     return normalize(legacy.data as AgentArtifact)
   }
   if (error) throw new Error(error.message)
+  return normalize(data as AgentArtifact)
+}
+
+/** Insert perdeu a corrida: relê a linha do vencedor e segue pelo update. */
+async function updateAfterConflict(
+  db: SupabaseClient,
+  params: UpsertArtifactInput,
+): Promise<AgentArtifact> {
+  const existing = await readArtifactRow(db, params.chatId, params.sourceKey)
+  if (!existing?.id) {
+    throw new Error("Não foi possível salvar o artefato (conflito de gravação).")
+  }
+  return updateArtifactRow(db, existing, params)
+}
+
+export async function upsertArtifact(
+  params: UpsertArtifactInput,
+): Promise<AgentArtifact> {
+  if (!supabase) throw new Error("Supabase não configurado.")
+  const db = supabase
+  // Sessão local (o client já faz auto-refresh) — evita um round-trip ao
+  // /auth/v1/user a cada save, que virava falha extra com rede instável.
+  const { data: sessionData } = await db.auth.getSession()
+  const userId = sessionData.session?.user.id
+  if (!userId) throw new Error("Sessão inválida.")
+
+  const existing = await readArtifactRow(db, params.chatId, params.sourceKey)
+  if (existing?.id) return updateArtifactRow(db, existing, params)
+
+  const insertRow = {
+    chat_id: params.chatId,
+    user_id: userId,
+    source_key: params.sourceKey,
+    kind: params.kind,
+    title: params.title,
+    content: params.content,
+    message_id: params.messageId ?? null,
+    version: 1,
+  }
+
+  const { data, error } = await db
+    .from("agent_artifacts")
+    .insert({ ...insertRow, is_truncated: Boolean(params.isTruncated) })
+    .select(SELECT_COLS)
+    .single()
+
+  if (error && isMissingTruncatedColumn(error.message)) {
+    const legacy = await db
+      .from("agent_artifacts")
+      .insert(insertRow)
+      .select(SELECT_COLS_LEGACY)
+      .single()
+    if (legacy.error) {
+      if (isUniqueViolation(legacy.error)) return updateAfterConflict(db, params)
+      throw new Error(legacy.error.message)
+    }
+    return normalize(legacy.data as AgentArtifact)
+  }
+  if (error) {
+    if (isUniqueViolation(error)) return updateAfterConflict(db, params)
+    throw new Error(error.message)
+  }
   return normalize(data as AgentArtifact)
 }
 

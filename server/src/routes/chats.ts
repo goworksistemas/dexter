@@ -1,5 +1,5 @@
 /**
- * GET /api/chats, GET /api/chats/:id/messages,
+ * GET /api/chats, GET /api/chats/:id/messages, GET /api/chats/:id/tail,
  * PATCH /api/chats/:id, DELETE /api/chats/:id —
  * dados e mutações de conversas. Ownership obrigatório (anti-IDOR).
  */
@@ -9,12 +9,14 @@ import { z } from "zod"
 import { NotFoundError, resolveUser } from "../services/auth.js"
 import {
   deleteChat,
+  getChatTail,
   getChatToolCalls,
   getMessagesPage,
   listChats,
   renameChat,
   setChatModel,
   setChatProject,
+  TAIL_MAX_LIMIT,
   truncateFromMessageId,
   truncateMessages,
 } from "../services/chat-store.js"
@@ -69,6 +71,29 @@ export default async function chatsRoutes(app: FastifyInstance): Promise<void> {
       limit,
       ...(before ? { before } : {}),
     })
+  })
+
+  /**
+   * Cauda da conversa: últimas N mensagens + `hasMore` (existe histórico
+   * antes). Endpoint leve para o front reconciliar ids depois de um run ou
+   * descobrir se a conversa é nova, sem recarregar o histórico inteiro.
+   */
+  app.get<{
+    Params: { id: string }
+    Querystring: { limit?: string }
+  }>("/api/chats/:id/tail", async (request) => {
+    const { userId } = await resolveUser(request)
+    const limitRaw = request.query.limit
+    if (limitRaw !== undefined) {
+      const limit = Number(limitRaw)
+      if (!Number.isFinite(limit) || limit < 1 || limit > TAIL_MAX_LIMIT) {
+        throw badRequest(
+          `limit deve ser um inteiro entre 1 e ${TAIL_MAX_LIMIT}.`,
+        )
+      }
+      return getChatTail(request.params.id, userId, { limit })
+    }
+    return getChatTail(request.params.id, userId)
   })
 
   /**

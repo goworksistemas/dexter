@@ -47,6 +47,8 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
   const [selectedModelId, setSelectedModelId] = React.useState<string | null>(null)
   const [defaultId, setDefaultId] = React.useState<string>("")
   const abortRef = React.useRef<AbortController | null>(null)
+  /** Probe em voo (lento) — o refresh de foco não pode abortá-lo. */
+  const probeControllerRef = React.useRef<AbortController | null>(null)
 
   const load = React.useCallback((opts?: { probe?: boolean }) => {
     abortRef.current?.abort()
@@ -55,6 +57,7 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
     const probe = opts?.probe ?? true
 
     if (!isAuthenticated) {
+      probeControllerRef.current = null
       setAllModels([])
       setSelectedModelId(null)
       setError(null)
@@ -63,7 +66,10 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
     }
 
     // Probe completo só no 1º load / refresh manual — focus não pode travar o chat.
-    if (probe) setIsLoading(true)
+    if (probe) {
+      probeControllerRef.current = controller
+      setIsLoading(true)
+    }
     setError(null)
 
     fetchModels(controller.signal, { probe })
@@ -87,7 +93,12 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
         }
       })
       .finally(() => {
-        if (!controller.signal.aborted && probe) setIsLoading(false)
+        if (probeControllerRef.current === controller) {
+          probeControllerRef.current = null
+        }
+        // Sem `&& probe`: senão um load(probe:false) que aborta o probe inicial
+        // deixa o seletor travado em "carregando" para sempre.
+        if (!controller.signal.aborted) setIsLoading(false)
       })
   }, [isAuthenticated])
 
@@ -99,9 +110,11 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
 
   // Focus: catálogo em cache do server (probe=0) — não rediscobre providers.
   React.useEffect(() => {
-    let last = 0
+    // Começa "agora": o 1º foco/visibilidade não pode abortar o probe inicial.
+    let last = Date.now()
     const onFocus = () => {
       if (document.visibilityState !== "visible" || !isAuthenticated) return
+      if (probeControllerRef.current) return
       const now = Date.now()
       if (now - last < 120_000) return
       last = now

@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useChats } from "@/lib/chats"
 import { useProjects, type ProjectSummary } from "@/lib/projects"
+import { cn } from "@/lib/utils"
 
 type SortKey = "updated" | "created" | "name"
 
@@ -43,6 +44,7 @@ export function ProjectsPage() {
   const [searchOpen, setSearchOpen] = React.useState(false)
   const [sort, setSort] = React.useState<SortKey>("updated")
   const [dialogOpen, setDialogOpen] = React.useState(false)
+  const [deletingId, setDeletingId] = React.useState<string | null>(null)
   const searchRef = React.useRef<HTMLInputElement>(null)
 
   React.useEffect(() => {
@@ -75,10 +77,13 @@ export function ProjectsPage() {
   }, [projects, query, sort])
 
   const handleDelete = async (project: ProjectSummary) => {
+    // Sem essa guarda o segundo clique roda contra um projeto já removido.
+    if (deletingId === project.id) return
     const ok = window.confirm(
       `Excluir o projeto "${project.name}"? As conversas permanecem (sem projeto). Arquivos do projeto serão removidos.`,
     )
     if (!ok) return
+    setDeletingId(project.id)
     try {
       await deleteProject(project.id)
       toast.success("Projeto excluído.")
@@ -87,6 +92,8 @@ export function ProjectsPage() {
       toast.error(
         err instanceof Error ? err.message : "Falha ao excluir projeto.",
       )
+    } finally {
+      setDeletingId((current) => (current === project.id ? null : current))
     }
   }
 
@@ -228,15 +235,26 @@ export function ProjectsPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            {visibleProjects.map((project) => (
-              <ProjectCard
-                key={project.id}
-                project={project}
-                chatCount={chatCountByProject.get(project.id) ?? 0}
-                onOpen={() => navigate(`/projects/${project.id}`)}
-                onDelete={() => void handleDelete(project)}
-              />
-            ))}
+            {visibleProjects.map((project) => {
+              const deleting = deletingId === project.id
+              return (
+                <div
+                  key={project.id}
+                  aria-busy={deleting || undefined}
+                  className={cn(
+                    "min-w-0 transition-opacity",
+                    deleting && "pointer-events-none opacity-60",
+                  )}
+                >
+                  <ProjectCard
+                    project={project}
+                    chatCount={chatCountByProject.get(project.id) ?? 0}
+                    onOpen={() => navigate(`/projects/${project.id}`)}
+                    onDelete={() => void handleDelete(project)}
+                  />
+                </div>
+              )
+            })}
           </div>
         )}
       </div>

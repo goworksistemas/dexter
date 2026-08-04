@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react"
@@ -39,28 +40,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true)
   const isConfigured = hasSupabase()
   const { hydrateTheme } = useTheme()
+  /** Último usuário cujo perfil já foi carregado (evita reler a cada evento). */
+  const lastProfileUserIdRef = useRef<string | null>(null)
+  /** Tema do banco só na 1ª hidratação — depois a escolha da sessão manda. */
+  const hydratedThemeRef = useRef(false)
 
   const loadProfile = useCallback(
-    async (next: Session | null) => {
+    async (next: Session | null, isActive: () => boolean = () => true) => {
       if (!next?.user) {
-        setUser(null)
+        lastProfileUserIdRef.current = null
+        hydratedThemeRef.current = false
+        if (isActive()) setUser(null)
         return
       }
       if (!isAllowedEmail(next.user.email)) {
         await supabaseSignOut().catch(() => undefined)
-        setSession(null)
-        setUser(null)
+        lastProfileUserIdRef.current = null
+        hydratedThemeRef.current = false
+        if (isActive()) {
+          setSession(null)
+          setUser(null)
+        }
         return
       }
+      lastProfileUserIdRef.current = next.user.id
       try {
         const profile = await fetchUserProfile(next.user)
+        if (!isActive()) return
         setUser(profile)
         const theme = profile.preferences?.theme
-        if (theme === "light" || theme === "dark" || theme === "system") {
+        if (
+          !hydratedThemeRef.current &&
+          (theme === "light" || theme === "dark" || theme === "system")
+        ) {
+          hydratedThemeRef.current = true
           hydrateTheme(theme as Theme)
         }
       } catch {
-        setUser(userToProfile(next.user))
+        if (isActive()) setUser(userToProfile(next.user))
       }
     },
     [hydrateTheme],
@@ -76,29 +93,59 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return
     }
 
-    void getSession().then(async (s) => {
-      if (!active) return
-      setSession(s)
-      await loadProfile(s)
+    const isActive = () => active
+    // Rede pendurada não pode deixar a UI presa em "Carregando sessão...".
+    const bootstrapTimeout = window.setTimeout(() => {
       if (active) setIsLoading(false)
-    })
+    }, 8_000)
 
-    const unsubscribe = onAuthStateChange((_event, next) => {
+    void getSession()
+      .then(async (s) => {
+        if (!active) return
+        setSession(s)
+        await loadProfile(s, isActive)
+      })
+      .catch(() => {
+        if (!active) return
+        setSession(null)
+        setUser(null)
+      })
+      .finally(() => {
+        if (active) setIsLoading(false)
+      })
+
+    const unsubscribe = onAuthStateChange((event, next) => {
       if (!active) return
       setSession(next)
-      void loadProfile(next).finally(() => {
+      // TOKEN_REFRESHED (a cada ~1h) e afins não precisam reler o perfil nem
+      // re-hidratar o tema — só a sessão mudou.
+      const mesmoUsuario =
+        Boolean(next?.user?.id) && next?.user?.id === lastProfileUserIdRef.current
+      const recarregarPerfil =
+        !mesmoUsuario ||
+        event === "SIGNED_IN" ||
+        event === "INITIAL_SESSION" ||
+        event === "USER_UPDATED"
+      if (!recarregarPerfil) {
+        setIsLoading(false)
+        return
+      }
+      void loadProfile(next, isActive).finally(() => {
         if (active) setIsLoading(false)
       })
     })
 
     return () => {
       active = false
+      window.clearTimeout(bootstrapTimeout)
       unsubscribe()
     }
   }, [isConfigured, loadProfile])
 
   const signOut = useCallback(async () => {
     await supabaseSignOut()
+    lastProfileUserIdRef.current = null
+    hydratedThemeRef.current = false
     setSession(null)
     setUser(null)
   }, [])

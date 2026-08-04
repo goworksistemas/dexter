@@ -63,7 +63,10 @@ export function ProjectDetailPage() {
   const [saving, setSaving] = React.useState(false)
   const [files, setFiles] = React.useState<ProjectFileRecord[]>([])
   const [loadingFiles, setLoadingFiles] = React.useState(false)
+  const [filesError, setFilesError] = React.useState<string | null>(null)
+  const [filesReloadToken, setFilesReloadToken] = React.useState(0)
   const [uploading, setUploading] = React.useState(false)
+  const [deleting, setDeleting] = React.useState(false)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
 
   React.useEffect(() => {
@@ -77,13 +80,15 @@ export function ProjectDetailPage() {
     if (!projectId) return
     const controller = new AbortController()
     setLoadingFiles(true)
+    setFilesError(null)
     fetchProjectFiles(projectId, controller.signal)
       .then((list) => {
         if (!controller.signal.aborted) setFiles(list)
       })
       .catch((err) => {
         if (controller.signal.aborted) return
-        toast.error(
+        // Sem estado de erro a lista vazia mentiria ("Nenhum arquivo ainda").
+        setFilesError(
           err instanceof Error ? err.message : "Falha ao listar arquivos.",
         )
       })
@@ -91,7 +96,7 @@ export function ProjectDetailPage() {
         if (!controller.signal.aborted) setLoadingFiles(false)
       })
     return () => controller.abort()
-  }, [projectId])
+  }, [projectId, filesReloadToken])
 
   const projectChats = React.useMemo(
     () => chats.filter((c) => c.project_id === projectId),
@@ -151,10 +156,12 @@ export function ProjectDetailPage() {
   }
 
   const handleDeleteProject = async () => {
+    if (deleting) return
     const ok = window.confirm(
       `Excluir o projeto "${project.name}"? As conversas permanecem (sem projeto). Arquivos do projeto serão removidos.`,
     )
     if (!ok) return
+    setDeleting(true)
     try {
       await deleteProject(project.id)
       toast.success("Projeto excluído.")
@@ -164,6 +171,8 @@ export function ProjectDetailPage() {
       toast.error(
         err instanceof Error ? err.message : "Falha ao excluir projeto.",
       )
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -246,10 +255,15 @@ export function ProjectDetailPage() {
               <DropdownMenuContent align="end">
                 <DropdownMenuItem
                   variant="destructive"
+                  disabled={deleting}
                   onSelect={() => void handleDeleteProject()}
                 >
-                  <Trash2 className="size-4" />
-                  Excluir projeto
+                  {deleting ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="size-4" />
+                  )}
+                  {deleting ? "Excluindo…" : "Excluir projeto"}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -421,6 +435,23 @@ export function ProjectDetailPage() {
             <div className="mt-2 space-y-2">
               {loadingFiles ? (
                 <Skeleton className="h-16 rounded-lg" />
+              ) : filesError ? (
+                <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-3">
+                  <p className="text-xs font-medium text-destructive">
+                    Não foi possível listar os arquivos.
+                  </p>
+                  <p className="mt-1 text-[11px] break-words text-muted-foreground">
+                    {filesError}
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    onClick={() => setFilesReloadToken((t) => t + 1)}
+                  >
+                    Tentar de novo
+                  </Button>
+                </div>
               ) : files.length === 0 ? (
                 <p className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
                   Nenhum arquivo ainda. Até 10 MB por arquivo.

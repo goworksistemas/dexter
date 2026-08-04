@@ -8,6 +8,7 @@ import type { ThreadMessageLike } from "@assistant-ui/react"
 import { AgentCoreTransport } from "@/lib/agentcore"
 import type {
   AgentProgressEvent,
+  ArtifactWire,
   ChatAttachment,
   ChatMessage,
   ChatTransport,
@@ -58,12 +59,7 @@ export interface StartChatRunParams {
   projectId?: string | null
   attachments?: ChatAttachment[]
   /** Artefatos — só em `context` (system prompt). Nunca na bolha do user. */
-  artifacts?: Array<{
-    kind: string
-    title: string
-    content: string
-    version: number
-  }>
+  artifacts?: ArtifactWire[]
 }
 
 type Listener = () => void
@@ -191,7 +187,7 @@ export class ChatRunsStore {
     this.startStallWatch(params.chatId, assistantMessageId, controller)
     this.notify()
 
-    void this.consume(params, assistantMessageId, controller.signal)
+    void this.consume(params, assistantMessageId, controller)
   }
 
   private isCurrent(chatId: string, assistantMessageId: string): boolean {
@@ -406,9 +402,10 @@ export class ChatRunsStore {
   private async consume(
     params: StartChatRunParams,
     assistantMessageId: string,
-    signal: AbortSignal,
+    controller: AbortController,
   ): Promise<void> {
     const { chatId } = params
+    const { signal } = controller
     let texto = ""
 
     // Mensagens limpas — sem apêndice legado. Artefatos vão só em context.
@@ -444,9 +441,16 @@ export class ChatRunsStore {
         { threadId: chatId, messages: chatMessages, context },
         signal,
       )) {
-        if (!this.isCurrent(chatId, assistantMessageId)) return
+        // Abandonar o loop sem abortar deixaria o fetch/SSE aberto no servidor.
+        if (!this.isCurrent(chatId, assistantMessageId)) {
+          controller.abort()
+          return
+        }
         // Parar já settled — descarta o resto do SSE.
-        if (this.runs.get(chatId)?.status !== "running") return
+        if (this.runs.get(chatId)?.status !== "running") {
+          controller.abort()
+          return
+        }
         this.touchActivity(chatId)
 
         if (chunk.type === "heartbeat") {
@@ -466,12 +470,14 @@ export class ChatRunsStore {
             status: "error",
             error: chunk.message,
           })
+          controller.abort()
           return
         } else if (chunk.type === "done") {
           this.settle(chatId, assistantMessageId, {
             assistantText: texto,
             status: "complete",
           })
+          controller.abort()
           return
         }
       }

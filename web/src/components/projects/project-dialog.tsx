@@ -56,13 +56,17 @@ export function ProjectDialog({
   const [instructions, setInstructions] = React.useState("")
   const [color, setColor] = React.useState<string | null>(PROJECT_COLORS[0])
   const [saving, setSaving] = React.useState(false)
+  const [nameInvalid, setNameInvalid] = React.useState(false)
   const [files, setFiles] = React.useState<ProjectFileRecord[]>([])
   const [loadingFiles, setLoadingFiles] = React.useState(false)
+  const [filesError, setFilesError] = React.useState<string | null>(null)
+  const [filesReloadToken, setFilesReloadToken] = React.useState(0)
   const [uploading, setUploading] = React.useState(false)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
 
   React.useEffect(() => {
     if (!open) return
+    setNameInvalid(false)
     if (mode === "edit" && project) {
       setName(project.name)
       setInstructions(project.instructions ?? "")
@@ -77,12 +81,14 @@ export function ProjectDialog({
 
   const loadFiles = React.useCallback(async (projectId: string, signal?: AbortSignal) => {
     setLoadingFiles(true)
+    setFilesError(null)
     try {
       const list = await fetchProjectFiles(projectId, signal)
       if (!signal?.aborted) setFiles(list)
     } catch (err) {
       if (signal?.aborted) return
-      toast.error(err instanceof Error ? err.message : "Falha ao listar arquivos.")
+      // Estado de erro explícito: lista vazia aqui significaria "sem arquivos".
+      setFilesError(err instanceof Error ? err.message : "Falha ao listar arquivos.")
     } finally {
       if (!signal?.aborted) setLoadingFiles(false)
     }
@@ -93,14 +99,16 @@ export function ProjectDialog({
     const controller = new AbortController()
     void loadFiles(project.id, controller.signal)
     return () => controller.abort()
-  }, [open, mode, project, loadFiles])
+  }, [open, mode, project, loadFiles, filesReloadToken])
 
   const handleSave = async () => {
     const trimmed = name.trim()
     if (!trimmed || trimmed.length > 120) {
+      setNameInvalid(true)
       toast.error("Nome deve ter entre 1 e 120 caracteres.")
       return
     }
+    setNameInvalid(false)
     setSaving(true)
     try {
       if (mode === "create") {
@@ -183,7 +191,13 @@ export function ProjectDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <form
+          className="space-y-4"
+          onSubmit={(e) => {
+            e.preventDefault()
+            void handleSave()
+          }}
+        >
           <div className="space-y-1.5">
             <label htmlFor="project-name" className="text-sm font-medium">
               Nome
@@ -191,11 +205,21 @@ export function ProjectDialog({
             <Input
               id="project-name"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value)
+                setNameInvalid(false)
+              }}
               placeholder="Ex.: Onboarding comercial"
               maxLength={120}
               autoFocus
+              aria-invalid={nameInvalid || undefined}
+              aria-describedby={nameInvalid ? "project-name-error" : undefined}
             />
+            {nameInvalid ? (
+              <p id="project-name-error" className="text-xs text-destructive">
+                Informe um nome de 1 a 120 caracteres.
+              </p>
+            ) : null}
           </div>
 
           <div className="space-y-1.5">
@@ -266,6 +290,24 @@ export function ProjectDialog({
               </p>
               {loadingFiles ? (
                 <p className="text-sm text-muted-foreground">Carregando arquivos…</p>
+              ) : filesError ? (
+                <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5">
+                  <p className="text-sm font-medium text-destructive">
+                    Não foi possível listar os arquivos.
+                  </p>
+                  <p className="mt-1 text-xs break-words text-muted-foreground">
+                    {filesError}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-2"
+                    onClick={() => setFilesReloadToken((t) => t + 1)}
+                  >
+                    Tentar de novo
+                  </Button>
+                </div>
               ) : files.length === 0 ? (
                 <p className="text-sm text-muted-foreground">Nenhum arquivo ainda.</p>
               ) : (
@@ -308,12 +350,12 @@ export function ProjectDialog({
             >
               Cancelar
             </Button>
-            <Button type="button" onClick={() => void handleSave()} disabled={saving}>
+            <Button type="submit" disabled={saving}>
               {saving ? <Loader2 className="size-4 animate-spin" /> : null}
               {mode === "create" ? "Criar projeto" : "Salvar"}
             </Button>
           </div>
-        </div>
+        </form>
       </DialogContent>
     </Dialog>
   )

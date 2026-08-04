@@ -14,6 +14,10 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  /* Faz o SO pintar scrollbars nativas, caret, autofill e controles nativos
+   * no mesmo tom do tema do app. */
+  color-scheme: light;
+
   --brand-primary: #3f76ff;
   --brand-secondary: #00c5e9;
   --brand-neutral: #606060;
@@ -65,6 +69,8 @@
 }
 
 .dark {
+  color-scheme: dark;
+
   --success: #34d399;
   --error: #f87171;
   --warning: #fbbf24;
@@ -334,6 +340,20 @@
 @media (prefers-reduced-motion: reduce) {
   .animate-\[fade-up_0\.45s_ease-out\] {
     animation: none !important;
+  }
+
+  /* Animações infinitas (dots de "processando", skeletons e o quadro de
+   * geração de imagem) param, mas o estado final segue visível. */
+  .animate-bounce,
+  .animate-pulse {
+    animation: none !important;
+  }
+
+  .image-gen-shimmer,
+  .image-gen-glow {
+    animation: none !important;
+    opacity: 0.6;
+    transform: none;
   }
 }
 

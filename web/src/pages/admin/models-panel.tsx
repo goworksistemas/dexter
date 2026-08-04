@@ -25,6 +25,7 @@ import {
   type AdminCatalogModel,
   type AdminModelProvider,
 } from "@/lib/admin/api"
+import { useModels } from "@/lib/models"
 import { cn } from "@/lib/utils"
 
 const PROVIDERS: AdminModelProvider[] = [
@@ -77,14 +78,19 @@ type SortKey =
 
 type SortDir = "asc" | "desc"
 
+const NO_VISIBLE_MODEL_MSG =
+  "Deixe ao menos um modelo visível — o chat para de funcionar sem nenhum."
+
 export function AdminModelsPanel() {
+  const { refreshModels } = useModels()
   const [models, setModels] = React.useState<AdminCatalogModel[]>([])
   const [providers, setProviders] = React.useState<
     Record<string, { credential: boolean }>
   >({})
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
-  const [busy, setBusy] = React.useState(false)
+  const [busyId, setBusyId] = React.useState<string | null>(null)
+  const [bulkBusy, setBulkBusy] = React.useState(false)
   const [tab, setTab] = React.useState<ModelsTab>("all")
   const [query, setQuery] = React.useState("")
   const [visibility, setVisibility] = React.useState<VisibilityFilter>("all")
@@ -234,7 +240,7 @@ export function AdminModelsPanel() {
     id: string,
     patch: Parameters<typeof patchAdminModel>[1],
   ) => {
-    setBusy(true)
+    setBusyId(id)
     try {
       const updated = await patchAdminModel(id, patch)
       setModels((prev) =>
@@ -245,32 +251,67 @@ export function AdminModelsPanel() {
         }),
       )
       toast.success("Salvo.")
+      refreshModels()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao atualizar.")
     } finally {
-      setBusy(false)
+      setBusyId(null)
     }
+  }
+
+  const toggleVisibility = (m: AdminCatalogModel) => {
+    const othersVisible = models.filter(
+      (x) => x.enabled && x.id !== m.id,
+    ).length
+    if (m.enabled && othersVisible === 0) {
+      toast.error(NO_VISIBLE_MODEL_MSG)
+      return
+    }
+    void applyOne(m.id, { enabled: !m.enabled })
   }
 
   const bulkSetEnabled = async (enabled: boolean) => {
     const ids = [...selected]
     if (ids.length === 0) return
-    setBusy(true)
+    if (!enabled) {
+      const remaining = models.filter(
+        (m) => m.enabled && !selected.has(m.id),
+      ).length
+      if (remaining === 0) {
+        toast.error(NO_VISIBLE_MODEL_MSG)
+        return
+      }
+      if (models.some((m) => m.is_default && selected.has(m.id))) {
+        const ok = window.confirm(
+          "O modelo padrão está na seleção. Ocultá-lo faz o app cair em outro modelo qualquer. Continuar?",
+        )
+        if (!ok) return
+      }
+    }
+    setBulkBusy(true)
     try {
-      await bulkPatchAdminModels(ids, enabled)
+      const { updated } = await bulkPatchAdminModels(ids, enabled)
       setModels((prev) =>
         prev.map((m) => (selected.has(m.id) ? { ...m, enabled } : m)),
       )
       setSelected(new Set())
-      toast.success(
-        enabled
-          ? `${ids.length} modelo(s) visíveis no seletor.`
-          : `${ids.length} modelo(s) ocultos.`,
-      )
+      if (updated !== ids.length) {
+        toast.warning(
+          `Só ${updated} de ${ids.length} modelo(s) foram atualizados — recarregando a lista.`,
+        )
+        await load()
+      } else {
+        toast.success(
+          enabled
+            ? `${updated} de ${ids.length} modelo(s) visíveis no seletor.`
+            : `${updated} de ${ids.length} modelo(s) ocultos.`,
+        )
+      }
+      refreshModels()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha no bulk.")
     } finally {
-      setBusy(false)
+      setBulkBusy(false)
     }
   }
 
@@ -288,7 +329,7 @@ export function AdminModelsPanel() {
           size="sm"
           variant="outline"
           className="gap-1.5"
-          disabled={loading || busy}
+          disabled={loading || bulkBusy || busyId !== null}
           onClick={() => void load()}
         >
           <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
@@ -408,10 +449,10 @@ export function AdminModelsPanel() {
                     size="sm"
                     variant="outline"
                     className="h-7 gap-1 text-xs"
-                    disabled={busy}
+                    disabled={bulkBusy}
                     onClick={() => void bulkSetEnabled(true)}
                   >
-                    {busy ? (
+                    {bulkBusy ? (
                       <Loader2 className="size-3 animate-spin" />
                     ) : (
                       <Eye className="size-3" />
@@ -422,10 +463,10 @@ export function AdminModelsPanel() {
                     size="sm"
                     variant="outline"
                     className="h-7 gap-1 text-xs"
-                    disabled={busy}
+                    disabled={bulkBusy}
                     onClick={() => void bulkSetEnabled(false)}
                   >
-                    {busy ? (
+                    {bulkBusy ? (
                       <Loader2 className="size-3 animate-spin" />
                     ) : (
                       <EyeOff className="size-3" />
@@ -436,7 +477,7 @@ export function AdminModelsPanel() {
                     size="sm"
                     variant="ghost"
                     className="h-7 text-xs"
-                    disabled={busy}
+                    disabled={bulkBusy}
                     onClick={() => setSelected(new Set())}
                   >
                     Limpar
@@ -620,21 +661,35 @@ export function AdminModelsPanel() {
                                     size="sm"
                                     variant="ghost"
                                     className="h-7 px-2 text-xs"
-                                    disabled={busy}
-                                    onClick={() =>
-                                      void applyOne(m.id, {
-                                        enabled: !m.enabled,
-                                      })
+                                    disabled={
+                                      busyId !== null ||
+                                      bulkBusy ||
+                                      (m.is_default && m.enabled)
                                     }
+                                    title={
+                                      m.is_default && m.enabled
+                                        ? "Defina outro modelo como padrão antes de ocultar este"
+                                        : undefined
+                                    }
+                                    onClick={() => toggleVisibility(m)}
                                   >
-                                    {m.enabled ? "Ocultar" : "Mostrar"}
+                                    {busyId === m.id ? (
+                                      <Loader2 className="size-3 animate-spin" />
+                                    ) : m.enabled ? (
+                                      "Ocultar"
+                                    ) : (
+                                      "Mostrar"
+                                    )}
                                   </Button>
                                   <Button
                                     size="sm"
                                     variant="ghost"
                                     className="h-7 px-2 text-xs"
                                     disabled={
-                                      busy || m.is_default || !m.enabled
+                                      busyId !== null ||
+                                      bulkBusy ||
+                                      m.is_default ||
+                                      !m.enabled
                                     }
                                     onClick={() =>
                                       void applyOne(m.id, { is_default: true })

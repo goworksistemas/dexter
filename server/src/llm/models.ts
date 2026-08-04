@@ -52,6 +52,8 @@ const DEFAULT_RESPONSE_MAX_TOKENS = 32_000
 const FALLBACK_MAX_OUTPUT_TOKENS = 32_000
 const DISCOVER_TIMEOUT_MS = 8_000
 const CATALOG_CACHE_TTL_MS = 60_000
+/** Lotes do /api/show do Ollama — não dispara dezenas de requisições juntas. */
+const OLLAMA_SHOW_CONCURRENCY = 5
 
 interface Discovered {
   provider: Provider
@@ -145,8 +147,10 @@ function humanizeModelId(id: string): string {
     .replace(/\bGemini\b/g, "Gemini")
 }
 
+/** Roda `run` com deadline. O signal VAI para o fetch — sem isso a requisição
+ * continuava rodando em background depois do timeout. */
 async function withTimeout<T>(
-  promise: Promise<T>,
+  run: (signal: AbortSignal) => Promise<T>,
   ms: number,
   label: string,
 ): Promise<T> {
@@ -154,7 +158,7 @@ async function withTimeout<T>(
   const timer = setTimeout(() => controller.abort(), ms)
   try {
     return await Promise.race([
-      promise,
+      run(controller.signal),
       new Promise<T>((_, reject) => {
         controller.signal.addEventListener("abort", () => {
           reject(new Error(`Timeout ${label} (${ms}ms)`))
@@ -258,32 +262,34 @@ async function discoverAnthropic(): Promise<Discovered[]> {
   if (!config.ANTHROPIC_API_KEY) return []
   try {
     const res = await withTimeout(
-      fetch("https://api.anthropic.com/v1/models?limit=100", {
-        headers: {
-          "x-api-key": config.ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01",
-        },
-      }).then(async (r) => {
-        if (!r.ok) {
-          const body = await r.text().catch(() => "")
-          throw new Error(
-            `HTTP ${r.status}${body ? `: ${body.slice(0, 160)}` : ""}`,
-          )
-        }
-        return r.json() as Promise<{
-          data?: Array<{
-            id?: string
-            display_name?: string
-            created_at?: string
-            max_input_tokens?: number | null
-            max_tokens?: number | null
-            capabilities?: {
-              image_input?: { supported?: boolean }
-              pdf_input?: { supported?: boolean }
-            } | null
+      (signal) =>
+        fetch("https://api.anthropic.com/v1/models?limit=100", {
+          headers: {
+            "x-api-key": config.ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+          },
+          signal,
+        }).then(async (r) => {
+          if (!r.ok) {
+            const body = await r.text().catch(() => "")
+            throw new Error(
+              `HTTP ${r.status}${body ? `: ${body.slice(0, 160)}` : ""}`,
+            )
+          }
+          return r.json() as Promise<{
+            data?: Array<{
+              id?: string
+              display_name?: string
+              created_at?: string
+              max_input_tokens?: number | null
+              max_tokens?: number | null
+              capabilities?: {
+                image_input?: { supported?: boolean }
+                pdf_input?: { supported?: boolean }
+              } | null
+            }>
           }>
-        }>
-      }),
+        }),
       DISCOVER_TIMEOUT_MS,
       "anthropic",
     )
@@ -317,19 +323,21 @@ async function discoverOpenAI(): Promise<Discovered[]> {
   if (!config.OPENAI_API_KEY) return []
   try {
     const res = await withTimeout(
-      fetch("https://api.openai.com/v1/models", {
-        headers: { Authorization: `Bearer ${config.OPENAI_API_KEY}` },
-      }).then(async (r) => {
-        if (!r.ok) {
-          const body = await r.text().catch(() => "")
-          throw new Error(
-            `HTTP ${r.status}${body ? `: ${body.slice(0, 160)}` : ""}`,
-          )
-        }
-        return r.json() as Promise<{
-          data?: Array<{ id?: string; created?: number }>
-        }>
-      }),
+      (signal) =>
+        fetch("https://api.openai.com/v1/models", {
+          headers: { Authorization: `Bearer ${config.OPENAI_API_KEY}` },
+          signal,
+        }).then(async (r) => {
+          if (!r.ok) {
+            const body = await r.text().catch(() => "")
+            throw new Error(
+              `HTTP ${r.status}${body ? `: ${body.slice(0, 160)}` : ""}`,
+            )
+          }
+          return r.json() as Promise<{
+            data?: Array<{ id?: string; created?: number }>
+          }>
+        }),
       DISCOVER_TIMEOUT_MS,
       "openai",
     )
@@ -369,24 +377,25 @@ async function discoverGemini(): Promise<Discovered[]> {
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=100&key=${encodeURIComponent(config.GEMINI_API_KEY)}`
     const res = await withTimeout(
-      fetch(url).then(async (r) => {
-        if (!r.ok) {
-          const body = await r.text().catch(() => "")
-          throw new Error(
-            `HTTP ${r.status}${body ? `: ${body.slice(0, 160)}` : ""}`,
-          )
-        }
-        return r.json() as Promise<{
-          models?: Array<{
-            name?: string
-            displayName?: string
-            description?: string
-            supportedGenerationMethods?: string[]
-            inputTokenLimit?: number
-            outputTokenLimit?: number
+      (signal) =>
+        fetch(url, { signal }).then(async (r) => {
+          if (!r.ok) {
+            const body = await r.text().catch(() => "")
+            throw new Error(
+              `HTTP ${r.status}${body ? `: ${body.slice(0, 160)}` : ""}`,
+            )
+          }
+          return r.json() as Promise<{
+            models?: Array<{
+              name?: string
+              displayName?: string
+              description?: string
+              supportedGenerationMethods?: string[]
+              inputTokenLimit?: number
+              outputTokenLimit?: number
+            }>
           }>
-        }>
-      }),
+        }),
       DISCOVER_TIMEOUT_MS,
       "gemini",
     )
@@ -432,18 +441,20 @@ async function ollamaShow(
 }> {
   try {
     const res = await withTimeout(
-      fetch(`${base}/api/show`, {
-        method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      }).then(async (r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<{
-          model_info?: Record<string, unknown>
-          details?: { parameter_size?: string; family?: string }
-          capabilities?: string[]
-        }>
-      }),
+      (signal) =>
+        fetch(`${base}/api/show`, {
+          method: "POST",
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({ name }),
+          signal,
+        }).then(async (r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.json() as Promise<{
+            model_info?: Record<string, unknown>
+            details?: { parameter_size?: string; family?: string }
+            capabilities?: string[]
+          }>
+        }),
       5_000,
       `ollama-show:${name}`,
     )
@@ -477,17 +488,18 @@ async function discoverOllama(): Promise<Discovered[]> {
       headers.Authorization = `Bearer ${process.env.OLLAMA_API_KEY}`
     }
     const res = await withTimeout(
-      fetch(`${base}/api/tags`, { headers }).then(async (r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json() as Promise<{
-          models?: Array<{
-            name?: string
-            model?: string
-            modified_at?: string
-            details?: { parameter_size?: string; family?: string }
+      (signal) =>
+        fetch(`${base}/api/tags`, { headers, signal }).then(async (r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.json() as Promise<{
+            models?: Array<{
+              name?: string
+              model?: string
+              modified_at?: string
+              details?: { parameter_size?: string; family?: string }
+            }>
           }>
-        }>
-      }),
+        }),
       DISCOVER_TIMEOUT_MS,
       "ollama",
     )
@@ -512,29 +524,35 @@ async function discoverOllama(): Promise<Discovered[]> {
       return tb - ta
     })
 
-    // /api/show em paralelo (limite razoável)
-    const shown = await Promise.all(
-      entries.map(async ([name, meta]) => {
-        const show = await ollamaShow(base, headers, name)
-        const detailsText =
-          show.detailsText ||
-          [meta.parameter_size, meta.family].filter(Boolean).join(" · ")
-        const ctx = show.context
-        return {
-          provider: "ollama" as const,
-          model: name,
-          label: name,
-          description: apiDescriptionOnly(detailsText || null),
-          traits: capabilityTraits(show.capabilities),
-          capabilities: show.capabilities,
-          maxOutputTokens: ctx,
-          inputTokenLimit: ctx,
-          releasedAt: toIsoDate(meta.modified_at),
-          latencyMs,
-          ok: true as const,
-        }
-      }),
-    )
+    // /api/show em lotes: com dezenas de modelos, um Promise.all sem limite
+    // satura o servidor de inferência.
+    const shown: Discovered[] = []
+    for (let i = 0; i < entries.length; i += OLLAMA_SHOW_CONCURRENCY) {
+      const lote = entries.slice(i, i + OLLAMA_SHOW_CONCURRENCY)
+      const parte = await Promise.all(
+        lote.map(async ([name, meta]) => {
+          const show = await ollamaShow(base, headers, name)
+          const detailsText =
+            show.detailsText ||
+            [meta.parameter_size, meta.family].filter(Boolean).join(" · ")
+          const ctx = show.context
+          return {
+            provider: "ollama" as const,
+            model: name,
+            label: name,
+            description: apiDescriptionOnly(detailsText || null),
+            traits: capabilityTraits(show.capabilities),
+            capabilities: show.capabilities,
+            maxOutputTokens: ctx,
+            inputTokenLimit: ctx,
+            releasedAt: toIsoDate(meta.modified_at),
+            latencyMs,
+            ok: true as const,
+          }
+        }),
+      )
+      shown.push(...parte)
+    }
     return shown
   } catch (err) {
     return [providerErrorRow("ollama", "Ollama", err, started)]
@@ -582,6 +600,10 @@ function applyOverrides(
   return models
 }
 
+/** Discovery em voo — N requisições com cache frio compartilham a MESMA
+ * descoberta em vez de multiplicar as chamadas às APIs dos providers. */
+let inflightCatalog: Promise<ProbedModel[]> | null = null
+
 async function buildCatalog(force = false): Promise<ProbedModel[]> {
   if (
     !force &&
@@ -590,7 +612,16 @@ async function buildCatalog(force = false): Promise<ProbedModel[]> {
   ) {
     return catalogCache.models
   }
+  if (!force && inflightCatalog) return inflightCatalog
 
+  const run = discoverCatalog().finally(() => {
+    if (inflightCatalog === run) inflightCatalog = null
+  })
+  inflightCatalog = run
+  return run
+}
+
+async function discoverCatalog(): Promise<ProbedModel[]> {
   const [anthropic, openai, gemini, ollama, overrides] = await Promise.all([
     providerCredentialPresent("anthropic")
       ? discoverAnthropic()

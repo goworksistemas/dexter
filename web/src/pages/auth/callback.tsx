@@ -18,6 +18,7 @@ import {
 export function AuthCallbackPage() {
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
+  const [expired, setExpired] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -28,11 +29,21 @@ export function AuthCallbackPage() {
         return
       }
 
+      // O Supabase devolve sucesso no query string, mas falhas de verificação
+      // (link expirado, access_denied) vêm no fragmento — ler os dois.
       const params = new URLSearchParams(window.location.search)
-      const code = params.get("code")
-      const tokenHash = params.get("token_hash")
-      const errDesc =
-        params.get("error_description") || params.get("error") || null
+      const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""))
+      const param = (key: string) => params.get(key) ?? hash.get(key)
+
+      const code = param("code")
+      const tokenHash = param("token_hash")
+      const errCode = param("error_code")
+      const errDesc = param("error_description") || param("error") || null
+
+      if (errCode === "otp_expired") {
+        if (active) setExpired(true)
+        return
+      }
 
       if (errDesc) {
         if (active) setError(errDesc)
@@ -83,6 +94,29 @@ export function AuthCallbackPage() {
       active = false
     }
   }, [navigate])
+
+  if (expired) {
+    return (
+      <AuthLayout
+        title="Este link expirou"
+        description="Links de confirmação e de recuperação são válidos por tempo limitado e só podem ser usados uma vez. Peça um novo e-mail para continuar."
+        footer={
+          <Link to="/login" className="font-medium text-primary hover:underline">
+            Ir para o login
+          </Link>
+        }
+      >
+        <div className="space-y-2">
+          <Button asChild className="w-full">
+            <Link to="/forgot-password">Reenviar e-mail de recuperação</Link>
+          </Button>
+          <Button asChild variant="outline" className="w-full">
+            <Link to="/signup">Criar conta novamente</Link>
+          </Button>
+        </div>
+      </AuthLayout>
+    )
+  }
 
   if (error) {
     return (

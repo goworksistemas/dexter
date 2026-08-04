@@ -1,5 +1,6 @@
 import * as React from "react"
 import { Blocks, Code2, ExternalLink, FileText, MessageSquare, Search } from "lucide-react"
+import { toast } from "sonner"
 
 import { PageHeading, PageShell } from "@/components/layout/page-shell"
 import { Button } from "@/components/ui/button"
@@ -14,7 +15,7 @@ import { useChats } from "@/lib/chats"
 import { formatRelative } from "@/lib/dates"
 
 export function ArtifactsPage() {
-  const { chats, selectChat } = useChats()
+  const { chats, selectChat, isLoadingChats, chatsError } = useChats()
   const [artifacts, setArtifacts] = React.useState<AgentArtifact[]>([])
   const [isLoading, setIsLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
@@ -44,6 +45,13 @@ export function ArtifactsPage() {
     for (const chat of chats) map.set(chat.id, chat.title || "Sem título")
     return map
   }, [chats])
+
+  /** A nova aba pode ser bloqueada pelo navegador — avisa em vez de nada. */
+  const abrirEmAba = React.useCallback((artifactId: string) => {
+    if (!openArtifactTab(artifactId)) {
+      toast.error("O navegador bloqueou a nova aba. Permita pop-ups para o Dexter.")
+    }
+  }, [])
 
   const visible = React.useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -118,6 +126,16 @@ export function ArtifactsPage() {
             {visible.map((artifact) => {
               const Icon = artifact.kind === "html" ? Code2 : FileText
               const origem = chatTitle.get(artifact.chat_id)
+              // A lista de chats vem do AgentCore em outro fetch: sem ela não
+              // dá para afirmar que a conversa foi removida.
+              const origemLabel = origem
+                ? `Conversa: ${origem}`
+                : isLoadingChats
+                  ? "Carregando origem…"
+                  : chatsError
+                    ? "Origem indisponível"
+                    : "Conversa removida"
+              const chatDisponivel = Boolean(origem)
               return (
                 <div
                   key={artifact.id}
@@ -125,7 +143,7 @@ export function ArtifactsPage() {
                 >
                   <button
                     type="button"
-                    onClick={() => openArtifactTab(artifact.id)}
+                    onClick={() => abrirEmAba(artifact.id)}
                     className="flex items-start gap-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
                   >
                     <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
@@ -140,7 +158,7 @@ export function ArtifactsPage() {
                   </button>
 
                   <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">
-                    {origem ? `Conversa: ${origem}` : "Conversa removida"}
+                    {origemLabel}
                   </p>
 
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -154,7 +172,7 @@ export function ArtifactsPage() {
                         variant="ghost"
                         className="h-7 gap-1 px-2"
                         title="Abrir em aba dedicada"
-                        onClick={() => openArtifactTab(artifact.id)}
+                        onClick={() => abrirEmAba(artifact.id)}
                       >
                         <ExternalLink className="size-3" />
                         Aba
@@ -164,7 +182,12 @@ export function ArtifactsPage() {
                         size="sm"
                         variant="ghost"
                         className="h-7 gap-1 px-2"
-                        title="Abrir conversa"
+                        title={
+                          chatDisponivel
+                            ? "Abrir conversa"
+                            : "Conversa de origem indisponível"
+                        }
+                        disabled={!chatDisponivel}
                         onClick={() => selectChat(artifact.chat_id)}
                       >
                         <MessageSquare className="size-3" />

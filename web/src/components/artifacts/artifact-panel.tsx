@@ -69,6 +69,26 @@ export function ArtifactPanel() {
   const [resizing, setResizing] = React.useState(false)
 
   const openedKeyRef = React.useRef<string | null>(null)
+  const panelRef = React.useRef<HTMLElement>(null)
+  const lastFocusedRef = React.useRef<HTMLElement | null>(null)
+
+  // Em overlay o painel é um dialog modal: o foco precisa entrar nele ao abrir
+  // (senão `aria-modal` mente para o leitor de tela) e voltar ao fechar.
+  // A dep é a CHAVE do artefato, não o objeto `active`: ele troca de identidade
+  // a cada save (autosave incluso) e o efeito remontaria arrancando o foco do
+  // editor ~900ms depois de o usuário parar de digitar.
+  const overlayKey = !isSplit && isPanelOpen && active ? active.sourceKey : null
+  React.useEffect(() => {
+    if (!overlayKey) return
+    const previous = document.activeElement
+    lastFocusedRef.current = previous instanceof HTMLElement ? previous : null
+    panelRef.current?.focus()
+    return () => {
+      const back = lastFocusedRef.current
+      lastFocusedRef.current = null
+      if (back?.isConnected) back.focus()
+    }
+  }, [overlayKey])
 
   React.useEffect(() => {
     if (resizing || panelWidth == null) return
@@ -257,6 +277,28 @@ export function ArtifactPanel() {
     if ((e.metaKey || e.ctrlKey) && (e.key === "s" || e.key === "S")) {
       e.preventDefault()
       void handleSave()
+      return
+    }
+    // Em overlay o conteúdo atrás não é inerte: prende o Tab dentro do painel.
+    if (!isSplit && e.key === "Tab") {
+      const root = panelRef.current
+      if (!root) return
+      const focusables = Array.from(
+        root.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      )
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      if (!first || !last) return
+      const current = document.activeElement
+      if (e.shiftKey && (current === first || current === root)) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && current === last) {
+        e.preventDefault()
+        first.focus()
+      }
     }
   }
 
@@ -266,14 +308,19 @@ export function ArtifactPanel() {
 
   return (
     <aside
+      ref={panelRef}
       onKeyDown={onPanelKeyDown}
       role={isSplit ? undefined : "dialog"}
       aria-modal={isSplit ? undefined : true}
       aria-label="Painel do artefato"
+      tabIndex={isSplit ? undefined : -1}
       style={isSplit && panelWidth != null ? { width: panelWidth } : undefined}
       className={cn(
-        "flex min-h-0 flex-col bg-card text-card-foreground",
+        "flex min-h-0 flex-col bg-card text-card-foreground outline-none",
         // Abaixo de lg o painel sai do fluxo: o chat mantém a largura inteira.
+        // z-30 fica ABAIXO do scrim do drawer (z-40) e do drawer (z-50) — com
+        // z-40 o painel empatava com o scrim e, vindo depois no DOM, pintava em
+        // cima dele: o drawer não escurecia o painel nem fechava no toque fora.
         "fixed inset-0 z-30 h-dvh w-full",
         "lg:relative lg:z-auto lg:h-full lg:shrink-0 lg:border-l lg:border-border/70",
         // Largura default só até o usuário arrastar (aí vale o style acima).

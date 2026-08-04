@@ -1,3 +1,4 @@
+import type * as React from "react"
 import { PanelLeft, Search, X } from "lucide-react"
 
 import { cn } from "@/lib/utils"
@@ -15,6 +16,7 @@ export function SidebarHeader({
   onToggleSearch,
   onCloseMobile,
   onGoHome,
+  closeButtonRef,
 }: {
   searchOpen: boolean
   onCollapse: () => void
@@ -22,6 +24,8 @@ export function SidebarHeader({
   onCloseMobile: () => void
   /** Marca/nome → conversa nova (home), não só navegar pra `/`. */
   onGoHome: () => void
+  /** Alvo do foco inicial quando o drawer mobile abre. */
+  closeButtonRef?: React.Ref<HTMLButtonElement>
 }) {
   return (
     <div className="flex h-14 shrink-0 items-center gap-2 px-3">
@@ -69,6 +73,7 @@ export function SidebarHeader({
       </SidebarTip>
 
       <Button
+        ref={closeButtonRef}
         variant="ghost"
         size="icon-sm"
         className="size-7 shrink-0 text-sidebar-foreground/55 hover:bg-sidebar-accent hover:text-sidebar-foreground md:hidden"

@@ -235,6 +235,7 @@ const TOOLS_TTL_MS = 10 * 60_000
 
 async function listNotionHttpAnthropicTools(
   accessToken: string,
+  signal?: AbortSignal,
 ): Promise<{ tools: AnthropicTool[]; names: Map<string, string> }> {
   if (notionToolsCache && Date.now() - notionToolsCache.at < TOOLS_TTL_MS) {
     return {
@@ -242,7 +243,7 @@ async function listNotionHttpAnthropicTools(
       names: notionToolsCache.names,
     }
   }
-  const mcpTools = await listNotionMcpTools(accessToken)
+  const mcpTools = await listNotionMcpTools(accessToken, signal)
   const names = new Map<string, string>()
   const tools: AnthropicTool[] = []
   for (const t of mcpTools) {
@@ -427,10 +428,36 @@ function tryParseJson(text: string): unknown {
   return text
 }
 
+/** Cancelamento nas chamadas REST: o fetch de notion-api/outlook-api tem timeout
+ * próprio e não recebe signal, então aqui paramos de esperar e descartamos a
+ * resposta pendente (o agent loop já tratou o run como cancelado). */
+function withAbort<T>(
+  promise: Promise<T>,
+  label: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (!signal) return promise
+  const cancelled = () => new Error(`${label}: consulta cancelada`)
+  if (signal.aborted) return Promise.reject(cancelled())
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(cancelled())
+    signal.addEventListener("abort", onAbort, { once: true })
+    promise.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort)
+    })
+  })
+}
+
 export async function executeConnectorTool(
   name: string,
   input: Record<string, unknown>,
-  ctx: { userId: string; email: string; runtime: ConnectorRuntime },
+  ctx: {
+    userId: string
+    email: string
+    runtime: ConnectorRuntime
+    /** Cancelamento do run (cliente desconectou / Parar). */
+    signal?: AbortSignal
+  },
 ): Promise<{
   ok: boolean
   slug?: string
@@ -469,26 +496,29 @@ export async function executeConnectorTool(
 
     if (id === "notion" && mode === "mcp") {
       const accessToken = await resolveUserConnectorToken(ctx.userId, "notion")
-      const listed = await listNotionHttpAnthropicTools(accessToken)
+      const listed = await listNotionHttpAnthropicTools(accessToken, ctx.signal)
       const mcpName = listed.names.get(fn)
       if (!mcpName) throw new Error(`tool Notion MCP não encontrada: ${fn}`)
       const args = normalizeNotionMcpArgs(mcpName, input)
-      const raw = await callNotionMcpTool(accessToken, mcpName, args)
+      const raw = await callNotionMcpTool(accessToken, mcpName, args, ctx.signal)
       return { ok: true, slug: id, fn, result: parseMcpToolResult(raw) }
     }
 
     if (mode === "mcp_stdio") {
       const mcpName = await resolveMcpToolName(id, fn)
-      const result = await callMcpTool(id, mcpName, input)
+      const result = await callMcpTool(id, mcpName, input, ctx.signal)
       return { ok: true, slug: id, fn, result }
     }
 
     if (mode === "rest") {
       const accessToken = await resolveUserConnectorToken(ctx.userId, id)
-      const result =
+      const result = await withAbort(
         id === "notion"
-          ? await executeNotionRest(fn, input, accessToken)
-          : await executeOutlookRest(fn, input, accessToken)
+          ? executeNotionRest(fn, input, accessToken)
+          : executeOutlookRest(fn, input, accessToken),
+        `${id}.${fn}`,
+        ctx.signal,
+      )
       return { ok: true, slug: id, fn, result }
     }
 

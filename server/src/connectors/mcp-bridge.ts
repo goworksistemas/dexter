@@ -92,7 +92,15 @@ async function getEntry(id: ConnectorId): Promise<CacheEntry> {
     label: id,
   })
 
-  const tools = await client.listTools()
+  let tools: McpTool[]
+  try {
+    tools = await client.listTools()
+  } catch (err) {
+    // Client nunca entra no cache aqui — sem o close o processo filho stdio
+    // fica órfão até o servidor morrer.
+    await client.close().catch(() => undefined)
+    throw err
+  }
   const entry: CacheEntry = { client, tools, loadedAt: Date.now() }
   cache.set(id, entry)
   return entry
@@ -114,12 +122,13 @@ export async function callMcpTool(
   id: ConnectorId,
   mcpToolName: string,
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   if (id === "outlook" && !OUTLOOK_MCP_ALLOWLIST.has(mcpToolName)) {
     throw new Error(`tool MCP Outlook não permitida: ${mcpToolName}`)
   }
   const entry = await getEntry(id)
-  const result = await entry.client.callTool(mcpToolName, args)
+  const result = await entry.client.callTool(mcpToolName, args, signal)
   if (result.isError) {
     const text = (result.content ?? [])
       .map((c) => (typeof c.text === "string" ? c.text : JSON.stringify(c)))

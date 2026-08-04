@@ -28,6 +28,19 @@ export interface ChatMessage {
   attachments?: ChatAttachment[];
 }
 
+/**
+ * Artefato como vai no fio para o AgentCore (`context.artifacts`).
+ * `is_truncated` é o que faz o backend escrever ", INCOMPLETO" no system
+ * prompt — sem ele o modelo recria o artefato em vez de completá-lo.
+ */
+export interface ArtifactWire {
+  kind: string;
+  title: string;
+  content: string;
+  version: number;
+  is_truncated?: boolean;
+}
+
 /** Contexto da conversa: qual sistema/tenant, usuário, etc. (o AgentCore usa
  * isto para rotear o acesso indexado aos projetos Supabase). */
 export interface ChatContext {
@@ -44,12 +57,7 @@ export interface ChatContext {
    * Versão atual dos artefatos da conversa. O AgentCore injeta no system
    * prompt — NÃO deve ser colado no content da mensagem do usuário.
    */
-  artifacts?: Array<{
-    kind: string
-    title: string
-    content: string
-    version: number
-  }>
+  artifacts?: ArtifactWire[];
   [key: string]: unknown;
 }
 

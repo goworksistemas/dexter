@@ -48,6 +48,7 @@ export function Sidebar() {
   const [query, setQuery] = React.useState("")
   const [searchOpen, setSearchOpen] = React.useState(false)
   const searchInputRef = React.useRef<HTMLInputElement>(null)
+  const closeButtonRef = React.useRef<HTMLButtonElement>(null)
 
   const filteredChats = React.useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -66,6 +67,13 @@ export function Sidebar() {
     const frame = requestAnimationFrame(() => searchInputRef.current?.focus())
     return () => cancelAnimationFrame(frame)
   }, [searchOpen, showRail])
+
+  // Drawer aberto: foco entra no painel (o retorno pro hambúrguer é do header).
+  React.useEffect(() => {
+    if (isDesktop || !open) return
+    const frame = requestAnimationFrame(() => closeButtonRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [isDesktop, open])
 
   const closeOnMobile = React.useCallback(() => setOpen(false), [setOpen])
 
@@ -128,6 +136,7 @@ export function Sidebar() {
           <>
             <SidebarHeader
               searchOpen={searchOpen}
+              closeButtonRef={closeButtonRef}
               onCollapse={() => setCollapsed(true)}
               onToggleSearch={() => {
                 setSearchOpen((v) => {

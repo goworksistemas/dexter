@@ -5,7 +5,7 @@
  * Gerações SSE ficam no `chatRunsStore` (nível app). Este componente anexa
  * a UI à conversa ativa e expõe editar / tentar novamente.
  */
-import { useCallback, useEffect } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { AssistantRuntimeProvider } from "@assistant-ui/react"
 import type { ThreadMessage, ThreadMessageLike } from "@assistant-ui/react"
 import { toast } from "sonner"
@@ -44,6 +44,19 @@ function paraThreadMessageLike(message: ThreadMessage): ThreadMessageLike {
   }
 }
 
+/** Ids do Postgres. Ids locais (nanoid do composer) o truncate rejeita com 400. */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Id fora de sincronia com o banco → aviso claro em vez do erro cru da API. */
+const AVISO_DESSINCRONIZADO =
+  "Não foi possível refazer esta resposta — recarregue a conversa e tente de novo."
+
+function ehErroDeIdDessincronizado(err: unknown): boolean {
+  const raw = err instanceof Error ? err.message : ""
+  return /truncate respondeu (400|404)|não encontrada/i.test(raw)
+}
+
 export function ChatThread() {
   const {
     activeChatId,
@@ -51,6 +64,7 @@ export function ChatThread() {
     expectsThread,
     historyError,
     reloadHistory,
+    syncHistoryAfterRun,
     hasMoreHistory,
     isLoadingOlderHistory,
     loadOlderHistory,
@@ -64,7 +78,9 @@ export function ChatThread() {
   const { startRun, cancelRun, getRun, subscribe } = useChatRuns()
   const storeRunning = useIsChatRunning(activeChatId)
   const runProgress = useChatRunProgress(activeChatId)
-  const stepsByMessageId = useChatStepsHistory(activeChatId)
+  // Sobe a cada settle: o "Ver detalhes" da resposta nova vem do /steps.
+  const [stepsVersion, setStepsVersion] = useState(0)
+  const stepsByMessageId = useChatStepsHistory(activeChatId, stepsVersion)
   const { setChatId, getContextArtifacts } = useArtifacts()
 
   const pendingAttachments = usePendingAttachments()
@@ -111,6 +127,15 @@ export function ChatThread() {
       const snap = getRun(activeChatId)
       if (!snap) return
       if (snap.status === "running") {
+        // Run conduzido pelo adapter local: o `watchStoreRun` já entrega o
+        // texto ao runtime. Resetar aqui (até 60x/s) reconstruiria o
+        // repositório inteiro e criaria uma segunda branch de assistente para
+        // a mesma resposta — só anexa quando a thread ainda não está no run.
+        const state = runtime.thread.getState()
+        const ultima = state.messages[state.messages.length - 1]
+        const jaAnexado =
+          ultima?.role === "assistant" && ultima.id === snap.assistantMessageId
+        if (state.isRunning && !jaAnexado) return
         runtime.thread.reset(runSnapshotToThreadMessages(snap))
         return
       }
@@ -161,10 +186,27 @@ export function ChatThread() {
     let estavaRodando = runtime.thread.getState().isRunning || storeRunning
     return subscribe(() => {
       const rodandoAgora = getRun(activeChatId)?.status === "running"
-      if (estavaRodando && !rodandoAgora) refreshChats()
+      if (estavaRodando && !rodandoAgora) {
+        refreshChats()
+        // Reconcilia com o banco: sem isso a thread fica com ids locais e
+        // "Editar"/"Tentar novamente" batem 400/404 no truncate. O remap leva
+        // as miniaturas de anexo para os ids novos das mensagens.
+        syncHistoryAfterRun(activeChatId, sentAttachments.remapear)
+        // O reload descarta o progresso ao vivo — repõe o "Ver detalhes".
+        setStepsVersion((v) => v + 1)
+      }
       estavaRodando = rodandoAgora
     })
-  }, [runtime, refreshChats, subscribe, getRun, activeChatId, storeRunning])
+  }, [
+    runtime,
+    refreshChats,
+    subscribe,
+    getRun,
+    activeChatId,
+    storeRunning,
+    syncHistoryAfterRun,
+    sentAttachments.remapear,
+  ])
 
   const stopGeneration = useCallback(() => {
     cancelRun(activeChatId)
@@ -241,6 +283,13 @@ export function ChatThread() {
         return
       }
 
+      if (!UUID_RE.test(messageId)) {
+        // Id local (composer) — o truncate rejeitaria com 400. Ressincroniza.
+        toast.error(AVISO_DESSINCRONIZADO)
+        reloadHistory()
+        return
+      }
+
       try {
         await truncateChatFromMessage(activeChatId, messageId)
         const kept = current.slice(0, index).map(paraThreadMessageLike)
@@ -252,12 +301,17 @@ export function ChatThread() {
         }
         iniciarRegeneracao([...kept, userMessage])
       } catch (err) {
+        if (ehErroDeIdDessincronizado(err)) {
+          toast.error(AVISO_DESSINCRONIZADO)
+          reloadHistory()
+          return
+        }
         toast.error(
           err instanceof Error ? err.message : "Falha ao editar a mensagem.",
         )
       }
     },
-    [activeChatId, iniciarRegeneracao, runtime, storeRunning],
+    [activeChatId, iniciarRegeneracao, reloadHistory, runtime, storeRunning],
   )
 
   const retryLastExchange = useCallback(async () => {
@@ -282,17 +336,34 @@ export function ChatThread() {
     // Mantém até a última msg do usuário (inclusive); apaga respostas depois.
     const keepCount = lastUserIndex + 1
     const deleteFrom = current[lastUserIndex + 1]
+    if (deleteFrom?.id && !UUID_RE.test(deleteFrom.id)) {
+      toast.error(AVISO_DESSINCRONIZADO)
+      reloadHistory()
+      return
+    }
     try {
       if (deleteFrom?.id) {
         await truncateChatFromMessage(activeChatId, deleteFrom.id)
       }
       iniciarRegeneracao(current.slice(0, keepCount).map(paraThreadMessageLike))
     } catch (err) {
+      if (ehErroDeIdDessincronizado(err)) {
+        toast.error(AVISO_DESSINCRONIZADO)
+        reloadHistory()
+        return
+      }
       toast.error(
         err instanceof Error ? err.message : "Falha ao tentar novamente.",
       )
     }
-  }, [activeChatId, cancelRun, iniciarRegeneracao, runtime, storeRunning])
+  }, [
+    activeChatId,
+    cancelRun,
+    iniciarRegeneracao,
+    reloadHistory,
+    runtime,
+    storeRunning,
+  ])
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -307,7 +378,7 @@ export function ChatThread() {
         onRetryHistory={reloadHistory}
         hasMoreHistory={hasMoreHistory}
         isLoadingOlderHistory={isLoadingOlderHistory}
-        onLoadOlderHistory={() => void loadOlderHistory()}
+        onLoadOlderHistory={() => loadOlderHistory()}
         chatId={activeChatId}
         runProgress={runProgress}
         stepsByMessageId={stepsByMessageId}

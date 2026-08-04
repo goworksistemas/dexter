@@ -50,6 +50,7 @@ import { ImageGenPlaceholder } from "@/components/chat/image-gen-placeholder"
 import { Markdown } from "@/components/chat/markdown"
 import { ModelSelector } from "@/components/chat/model-selector"
 import { modelCaps, useModels } from "@/lib/models"
+import { useChatModel } from "@/lib/chats/use-chat-model"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import { useMediaQuery } from "@/hooks/use-media-query"
@@ -115,7 +116,8 @@ interface ThreadProps {
   onRetryHistory?: () => void
   hasMoreHistory?: boolean
   isLoadingOlderHistory?: boolean
-  onLoadOlderHistory?: () => void
+  /** `false` = nada foi carregado (não restaurar a posição do scroll). */
+  onLoadOlderHistory?: () => boolean | void | Promise<boolean | void>
   /** Troca de conversa → pin imediato no fim. */
   chatId?: string
   /** Progresso do run desta conversa (timeline de tools + fase atual). */
@@ -165,22 +167,39 @@ export function Thread({
   /** Ao abrir/trocar chat, cola no fim até o usuário rolar pra cima. */
   const pinBottomRef = useRef(true)
   const pertoDoFimRef = useRef(true)
-  /** scrollTop programático dispara onScroll — não pode soltar o pin. */
-  const ignoreScrollRef = useRef(false)
+  /**
+   * scrollTop que NÓS setamos — o onScroll correspondente não pode soltar o
+   * pin. Flag booleana não serve: durante o streaming `colarNoFim` roda quase
+   * a cada frame e engoliria todo scroll real do usuário.
+   */
+  const expectedTopRef = useRef(-1)
   /** Após abrir, ignora “unpin” por um instante (eventos espúrios). */
   const pinGraceUntilRef = useRef(0)
   const prevChatIdRef = useRef(chatId)
   const prevOldestIdRef = useRef<string | null>(null)
   const prevScrollHeightRef = useRef(0)
   const restoringOlderRef = useRef(false)
+  const touchStartYRef = useRef(0)
 
   const colarNoFim = useCallback((el: HTMLDivElement) => {
     // Nunca usar behavior:"smooth" aqui — é exatamente o scroll animado do topo.
-    ignoreScrollRef.current = true
     el.scrollTop = el.scrollHeight
-    requestAnimationFrame(() => {
-      ignoreScrollRef.current = false
-    })
+    // Guarda o valor já clampeado pelo browser.
+    expectedTopRef.current = el.scrollTop
+  }, [])
+
+  /**
+   * Gesto explícito de subir (roda, ao contrário do onScroll, mesmo quando o
+   * scroll é programático): solta o pin para o usuário poder reler durante o
+   * streaming. O onScroll seguinte recalcula `pertoDoFim` e o botão.
+   */
+  const soltarPin = useCallback(() => {
+    const el = viewportRef.current
+    // Sem nada acima para ver, soltar o pin só desligaria o auto-scroll.
+    if (!el || el.scrollTop <= 0) return
+    pinBottomRef.current = false
+    pertoDoFimRef.current = false
+    expectedTopRef.current = -1
   }, [])
 
   const rolarParaFim = useCallback((behavior: ScrollBehavior = "smooth") => {
@@ -228,12 +247,9 @@ export function Thread({
       oldestId !== prevOldestIdRef.current &&
       prevScrollHeightRef.current > 0
     ) {
-      ignoreScrollRef.current = true
       const delta = el.scrollHeight - prevScrollHeightRef.current
       el.scrollTop += delta
-      requestAnimationFrame(() => {
-        ignoreScrollRef.current = false
-      })
+      expectedTopRef.current = el.scrollTop
       restoringOlderRef.current = false
       prevOldestIdRef.current = oldestId
       prevScrollHeightRef.current = el.scrollHeight
@@ -289,11 +305,23 @@ export function Thread({
   const handleScroll = () => {
     const el = viewportRef.current
     if (!el) return
-    if (ignoreScrollRef.current) return
     if (!viewportPronto && pinBottomRef.current) return
 
     const distancia = el.scrollHeight - el.scrollTop - el.clientHeight
     const noFim = distancia < LIMIAR_PROXIMO_DO_FIM
+
+    // Evento do nosso próprio scrollTop: nunca descola o pin, só confirma
+    // que continuamos no fim (o usuário pode ter voltado pra cá na mão).
+    if (
+      expectedTopRef.current >= 0 &&
+      Math.abs(el.scrollTop - expectedTopRef.current) <= 2
+    ) {
+      if (noFim) {
+        pertoDoFimRef.current = true
+        setPertoDoFim(true)
+      }
+      return
+    }
 
     // No grace da abertura, scroll espúrio não descola o pin.
     if (Date.now() < pinGraceUntilRef.current) {
@@ -314,9 +342,18 @@ export function Thread({
       !isLoadingHistory &&
       onLoadOlderHistory
     ) {
+      // Só mantém a restauração se a carga realmente começou — senão o
+      // prevScrollHeight congelado joga a conversa pra uma posição aleatória
+      // na próxima vez que o `oldestId` mudar.
       restoringOlderRef.current = true
       prevScrollHeightRef.current = el.scrollHeight
-      onLoadOlderHistory()
+      void Promise.resolve(onLoadOlderHistory())
+        .then((ok) => {
+          if (ok === false) restoringOlderRef.current = false
+        })
+        .catch(() => {
+          restoringOlderRef.current = false
+        })
     }
   }
 
@@ -340,8 +377,10 @@ export function Thread({
     return null
   })()
 
-  const { models, selectedModelId } = useModels()
-  const selectedModel = models.find((m) => m.id === selectedModelId)
+  // Capacidades do modelo QUE VAI RODAR (pinado na conversa > default global).
+  const { models } = useModels()
+  const { effectiveModelId } = useChatModel()
+  const selectedModel = models.find((m) => m.id === effectiveModelId)
   const capsSelected = modelCaps(selectedModel)
   const imageGenSelected =
     capsSelected.imageGeneration &&
@@ -352,7 +391,9 @@ export function Thread({
       runtime={runtime}
       composerState={composerState}
       isRunning={isRunning}
-      composerLocked={isLoadingHistory}
+      // Travar só quando não há nada na tela — revalidação em background de um
+      // chat já pintado não pode bloquear o envio.
+      composerLocked={isLoadingHistory && vazio}
       pendingAttachments={pendingAttachments}
       onStop={onStop}
       centered={mostrarHome}
@@ -374,7 +415,11 @@ export function Thread({
       <div className="relative min-h-0 flex-1">
         {!vazio && (hasMoreHistory || isLoadingOlderHistory) ? (
           <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex justify-center pt-2">
-            <span className="rounded-full bg-background/80 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur-sm">
+            <span
+              role="status"
+              aria-live="polite"
+              className="rounded-full bg-background/80 px-2.5 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur-sm"
+            >
               {isLoadingOlderHistory
                 ? "Carregando mensagens anteriores…"
                 : "Role para cima para ver o início"}
@@ -384,6 +429,31 @@ export function Thread({
         <div
           ref={viewportRef}
           onScroll={handleScroll}
+          onWheel={(e) => {
+            if (e.deltaY < 0) soltarPin()
+          }}
+          onTouchStart={(e) => {
+            touchStartYRef.current = e.touches[0]?.clientY ?? 0
+          }}
+          onTouchMove={(e) => {
+            const y = e.touches[0]?.clientY ?? 0
+            // Dedo descendo = conteúdo subindo = usuário quer ver o que passou.
+            if (y - touchStartYRef.current > 8) soltarPin()
+          }}
+          onKeyDown={(e) => {
+            // Dentro de um campo (edição de mensagem, seletor de modelo) essas
+            // teclas movem o cursor — não são gesto de rolar a conversa.
+            const alvo = e.target as HTMLElement | null
+            if (alvo?.closest?.("input, textarea, [contenteditable=true]")) {
+              return
+            }
+            if (e.key === "PageUp" || e.key === "ArrowUp" || e.key === "Home") {
+              soltarPin()
+            }
+          }}
+          tabIndex={0}
+          role="log"
+          aria-label="Mensagens da conversa"
           className={cn(
             // NÃO usar scroll-smooth aqui — anima scrollTop e “abre no topo”.
             "scroll-thin h-full overflow-y-auto",
@@ -969,8 +1039,11 @@ function Composer({
 }: ComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const { models, selectedModelId } = useModels()
-  const selected = models.find((m) => m.id === selectedModelId)
+  // Mesmo modelo que o run vai usar e que o ModelSelector mostra — o default
+  // global só vale para conversas novas.
+  const { models } = useModels()
+  const { effectiveModelId } = useChatModel()
+  const selected = models.find((m) => m.id === effectiveModelId)
   const caps = modelCaps(selected)
   const imageGenModel =
     caps.imageGeneration &&
@@ -1009,7 +1082,7 @@ function Composer({
     pendingAttachments.clear()
     toast.message("Anexos removidos: o modelo atual não os suporta.")
     // eslint-disable-next-line react-hooks/exhaustive-deps -- só ao mudar caps/modelo
-  }, [selectedModelId, canAttachImages, canAttachFiles])
+  }, [effectiveModelId, canAttachImages, canAttachFiles])
 
   const enviar = () => {
     if (!composerState.canSend || isRunning || composerLocked) return
@@ -1046,13 +1119,15 @@ function Composer({
     },
   })
 
-  const placeholder = imageOnly
-    ? canAttachImages
-      ? "Descreva a imagem… Anexe uma referência se quiser editar."
-      : "Descreva a imagem que deseja gerar…"
-    : canAttach
-      ? "Pergunte ao Dexter — pode anexar imagem ou PDF…"
-      : "Pergunte ao Dexter sobre sistemas, processos ou integrações…"
+  const placeholder = composerLocked
+    ? "Carregando a conversa…"
+    : imageOnly
+      ? canAttachImages
+        ? "Descreva a imagem… Anexe uma referência se quiser editar."
+        : "Descreva a imagem que deseja gerar…"
+      : canAttach
+        ? "Pergunte ao Dexter — pode anexar imagem ou PDF…"
+        : "Pergunte ao Dexter sobre sistemas, processos ou integrações…"
 
   return (
     <form

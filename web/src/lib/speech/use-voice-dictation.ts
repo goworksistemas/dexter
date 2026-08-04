@@ -18,6 +18,14 @@ export type VoiceDictationStatus = "idle" | "recording" | "transcribing"
 const LIVE_PASS_MS = 2_500
 /** Áudio abaixo disso costuma ser ruído/clique sem fala. */
 const MIN_BLOB_BYTES = 1_024
+/** A cada bloco desses o intervalo ao vivo aumenta (o payload é cumulativo). */
+const LIVE_STEP_BYTES = 512 * 1_024
+/** Acima disso a prévia ao vivo para — só a passada final continua valendo. */
+const LIVE_MAX_BYTES = 1_500_000
+/** Idem por duração da sessão. */
+const LIVE_MAX_MS = 60_000
+/** MediaRecorder pode não emitir "stop" — não travar o botão esperando. */
+const STOP_TIMEOUT_MS = 1_500
 
 function pickMimeType(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined
@@ -49,6 +57,10 @@ export function useVoiceDictation(opts: {
   const sessionIdRef = React.useRef(0)
   const inFlightRef = React.useRef(false)
   const liveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Bytes acumulados na sessão e início dela — teto das passadas ao vivo. */
+  const totalBytesRef = React.useRef(0)
+  const startedAtRef = React.useRef(0)
+  const liveCapNoticeRef = React.useRef(false)
 
   const onTranscriptRef = React.useRef(opts.onTranscript)
   onTranscriptRef.current = opts.onTranscript
@@ -121,6 +133,23 @@ export function useVoiceDictation(opts: {
   const scheduleLivePass = React.useCallback(() => {
     clearLiveTimer()
     const sessionId = sessionIdRef.current
+
+    // Cada passada reenvia TODO o áudio da sessão: sem teto o tráfego e a CPU
+    // crescem de forma quadrática (e o body estoura no proxy).
+    const bytes = totalBytesRef.current
+    const elapsed = startedAtRef.current ? Date.now() - startedAtRef.current : 0
+    if (bytes > LIVE_MAX_BYTES || elapsed > LIVE_MAX_MS) {
+      if (!liveCapNoticeRef.current) {
+        liveCapNoticeRef.current = true
+        toast.message(
+          "Ditado longo: a prévia ao vivo pausou. O texto final vem ao parar a gravação.",
+        )
+      }
+      return
+    }
+    const delay =
+      LIVE_PASS_MS * Math.max(1, Math.ceil(bytes / LIVE_STEP_BYTES))
+
     liveTimerRef.current = setTimeout(async () => {
       if (sessionIdRef.current !== sessionId) return
       if (recorderRef.current?.state === "recording") {
@@ -132,7 +161,7 @@ export function useVoiceDictation(opts: {
         await transcribePass(false)
         if (sessionIdRef.current === sessionId) scheduleLivePass()
       }
-    }, LIVE_PASS_MS)
+    }, delay)
   }, [clearLiveTimer, transcribePass])
 
   const stopRecorder = React.useCallback((): Promise<void> => {
@@ -177,22 +206,32 @@ export function useVoiceDictation(opts: {
   const stopAndFinalize = React.useCallback(async () => {
     clearLiveTimer()
     setStatus("transcribing")
-
-    await stopRecorder()
-    stopTracks()
-
     const sessionId = sessionIdRef.current
-    if (!cumulativeBlob()) {
-      if (!liveText) toast.message("Não capturamos fala reconhecível. Tente de novo.")
-      chunksRef.current = []
-      setStatus("idle")
-      return
-    }
 
-    await transcribePass(true)
-    if (sessionIdRef.current !== sessionId) return
-    chunksRef.current = []
-    setStatus("idle")
+    try {
+      // Se o evento "stop" não chegar (device removido, recorder inconsistente),
+      // o timeout garante que o botão de ditado não fique travado.
+      await Promise.race([
+        stopRecorder(),
+        new Promise<void>((resolve) => setTimeout(resolve, STOP_TIMEOUT_MS)),
+      ])
+      stopTracks()
+
+      if (!cumulativeBlob()) {
+        if (!liveText) {
+          toast.message("Não capturamos fala reconhecível. Tente de novo.")
+        }
+        return
+      }
+
+      await transcribePass(true)
+    } finally {
+      // Sessão nova (cancel/novo start) já cuidou do próprio estado.
+      if (sessionIdRef.current === sessionId) {
+        chunksRef.current = []
+        setStatus("idle")
+      }
+    }
   }, [
     clearLiveTimer,
     cumulativeBlob,
@@ -226,6 +265,9 @@ export function useVoiceDictation(opts: {
       abortRef.current?.abort()
       inFlightRef.current = false
       chunksRef.current = []
+      totalBytesRef.current = 0
+      startedAtRef.current = Date.now()
+      liveCapNoticeRef.current = false
       setLiveText("")
       mediaRef.current = stream
 
@@ -238,7 +280,10 @@ export function useVoiceDictation(opts: {
         : new MediaRecorder(stream)
       recorderRef.current = recorder
       recorder.ondataavailable = (ev) => {
-        if (ev.data.size > 0) chunksRef.current.push(ev.data)
+        if (ev.data.size > 0) {
+          chunksRef.current.push(ev.data)
+          totalBytesRef.current += ev.data.size
+        }
       }
       recorder.start(500)
 
@@ -282,6 +327,8 @@ export function useVoiceDictation(opts: {
     }
     recorderRef.current = null
     chunksRef.current = []
+    totalBytesRef.current = 0
+    startedAtRef.current = 0
     stopTracks()
     setLiveText("")
     setStatus("idle")

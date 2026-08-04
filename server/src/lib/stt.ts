@@ -6,6 +6,8 @@
 import { config } from "../config.js"
 
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024
+/** Provider pendurado não pode prender o request (e o Buffer) para sempre. */
+const STT_TIMEOUT_MS = 60_000
 
 /** Vocabulário do domínio — sem isso o modelo "corrige" nomes próprios
  * (NetworkGo → network go, Dexter → dester, etc.). */
@@ -16,12 +18,30 @@ const STT_PROMPT =
 
 export class SttError extends Error {
   statusCode: number
+  /** Detalhe cru do provider (org id, deployment, billing) — só para log. */
+  detail?: string
 
-  constructor(message: string, statusCode = 502) {
+  constructor(message: string, statusCode = 502, detail?: string) {
     super(message)
     this.name = "SttError"
     this.statusCode = statusCode
+    this.detail = detail
   }
+}
+
+/** Mensagem fixa por faixa de status — o corpo do provider fica no log. */
+function mensagemPorStatus(status: number): string {
+  if (status === 401 || status === 403) {
+    return "Serviço de transcrição recusou a credencial."
+  }
+  if (status === 413) return "Áudio grande demais para o serviço de transcrição."
+  if (status === 429) {
+    return "Serviço de transcrição ocupado. Tente novamente em instantes."
+  }
+  if (status >= 400 && status < 500) {
+    return "Áudio rejeitado pelo serviço de transcrição."
+  }
+  return "Serviço de transcrição indisponível."
 }
 
 function sttBaseUrl(): string {
@@ -52,8 +72,43 @@ function extensionForMime(mime: string): string {
   return "webm"
 }
 
+/** POST no provider com deadline próprio (+ cancelamento do request, se vier).
+ * Sem isso um provider pendurado prendia o request e o Buffer de até 25 MB. */
+async function postTranscription(
+  url: string,
+  headers: Record<string, string>,
+  form: FormData,
+  externo?: AbortSignal,
+): Promise<Response> {
+  const timeout = AbortSignal.timeout(STT_TIMEOUT_MS)
+  try {
+    return await fetch(url, {
+      method: "POST",
+      headers,
+      body: form,
+      signal: externo ? AbortSignal.any([timeout, externo]) : timeout,
+    })
+  } catch (err) {
+    if (timeout.aborted) {
+      throw new SttError(
+        "Serviço de transcrição não respondeu no tempo limite.",
+        504,
+      )
+    }
+    if (externo?.aborted) {
+      throw new SttError("Transcrição cancelada.", 499)
+    }
+    throw new SttError(
+      "Serviço de transcrição indisponível.",
+      502,
+      err instanceof Error ? err.message : String(err),
+    )
+  }
+}
+
 export async function transcribeAudio(input: {
-  bytes: Buffer
+  /** Áudio cru (vem do multipart, sem passar por base64). */
+  bytes: Uint8Array
   mimeType: string
   language?: string
   signal?: AbortSignal
@@ -77,11 +132,11 @@ export async function transcribeAudio(input: {
   const mime = input.mimeType || "audio/webm"
   const ext = extensionForMime(mime)
   const form = new FormData()
-  form.append(
-    "file",
-    new Blob([new Uint8Array(input.bytes)], { type: mime }),
-    `audio.${ext}`,
-  )
+  // O buffer entra direto no Blob — sem cópia intermediária de até 25 MB.
+  // O cast só resolve o ArrayBufferLike vs ArrayBuffer do TS: o áudio vem do
+  // multipart, nunca de SharedArrayBuffer.
+  const view = input.bytes as Uint8Array<ArrayBuffer>
+  form.append("file", new Blob([view], { type: mime }), `audio.${ext}`)
   form.append("model", config.STT_MODEL)
   form.append("language", input.language?.trim() || "pt")
   form.append("response_format", "json")
@@ -96,18 +151,17 @@ export async function transcribeAudio(input: {
   }
 
   const url = `${base}/v1/audio/transcriptions`
-  const res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: form,
-    signal: input.signal,
-  })
+  const res = await postTranscription(url, headers, form, input.signal)
 
   if (!res.ok) {
     const body = await res.text().catch(() => "")
+    const detail = `STT HTTP ${res.status}: ${body.slice(0, 240) || res.statusText}`
+    // eslint-disable-next-line no-console
+    console.error(`[stt] ${detail}`)
     throw new SttError(
-      `STT HTTP ${res.status}: ${body.slice(0, 240) || res.statusText}`,
+      mensagemPorStatus(res.status),
       res.status >= 400 && res.status < 500 ? res.status : 502,
+      detail,
     )
   }
 

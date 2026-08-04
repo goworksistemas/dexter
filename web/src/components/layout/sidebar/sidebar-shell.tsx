@@ -26,18 +26,33 @@ export function SidebarShell({
   children: React.ReactNode
 }) {
   const railMode = isDesktop && collapsed
+  /** Drawer fora da tela: não deve receber foco nem ser lido por AT. */
+  const drawerHidden = !isDesktop && !open
+
+  // Escape fecha o drawer no mobile (o scrim já fecha no clique).
+  React.useEffect(() => {
+    if (isDesktop || !open) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return
+      onOverlayClick()
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [isDesktop, open, onOverlayClick])
 
   return (
     <>
       {!isDesktop && open ? (
         <div
-          className="fixed inset-0 z-40 bg-foreground/25"
+          className="fixed inset-0 z-40 animate-in bg-black/50 duration-200 fade-in-0"
           onClick={onOverlayClick}
           aria-hidden="true"
         />
       ) : null}
 
       <aside
+        inert={drawerHidden}
+        aria-hidden={drawerHidden || undefined}
         className={cn(
           "flex flex-col overflow-hidden border-r border-sidebar-border/70 bg-sidebar text-sidebar-foreground",
           isDesktop

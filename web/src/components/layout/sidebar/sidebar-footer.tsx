@@ -116,10 +116,7 @@ export function SidebarFooter({
           onSignOut={onSignOut}
         />
       </DropdownMenu>
-      <p
-        className="px-2 pt-1.5 text-[10px] leading-none tracking-wide text-sidebar-foreground/35"
-        aria-label={`Versão ${__APP_VERSION__}`}
-      >
+      <p className="px-2 pt-1.5 text-[10px] leading-none tracking-wide text-muted-foreground">
         v{__APP_VERSION__}
       </p>
     </div>

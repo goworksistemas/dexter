@@ -14,7 +14,12 @@ import type {
   ThreadMessage,
 } from "@assistant-ui/react"
 
-import type { ChatAttachment, ChatMessage, ChatTransport } from "@/lib/agentcore/contract"
+import type {
+  ArtifactWire,
+  ChatAttachment,
+  ChatMessage,
+  ChatTransport,
+} from "@/lib/agentcore/contract"
 import { chatRunsStore } from "@/lib/chats/chat-runs-store"
 import { MockTransport } from "@/lib/runtime/mock-transport"
 import { AgentCoreTransport } from "@/lib/agentcore"
@@ -134,12 +139,7 @@ async function* watchStoreRun(
   }
 }
 
-export type ArtifactsContextBridge = () => Array<{
-  kind: string
-  title: string
-  content: string
-  version: number
-}>
+export type ArtifactsContextBridge = () => ArtifactWire[]
 
 function criarChatModelAdapter(
   threadIdRef: { current: string },

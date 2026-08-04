@@ -24,6 +24,8 @@ const MAX_RESULTS_CAP = 10
 const DEFAULT_RESULTS = 6
 const FETCH_CHARS_CAP = 40_000
 const FETCH_CHARS_DEFAULT = 20_000
+/** Teto absoluto do corpo baixado (bytes) — nunca bufferiza um arquivo enorme. */
+const FETCH_MAX_BYTES = 5_000_000
 /** Só engines de qualidade na categoria general — sem isso, quando o Google
  * bloqueia o IP do datacenter sobram engines fracos devolvendo lixo. */
 const GENERAL_ENGINES = "google,bing,duckduckgo,brave"
@@ -152,6 +154,12 @@ function hostBloqueado(hostname: string): boolean {
   return false
 }
 
+/** Deadline da tool + cancelamento do run (o que vier primeiro). */
+function comDeadline(timeoutMs: number, externo?: AbortSignal): AbortSignal {
+  const deadline = AbortSignal.timeout(timeoutMs)
+  return externo ? AbortSignal.any([deadline, externo]) : deadline
+}
+
 function htmlParaTexto(html: string): { title: string | null; text: string } {
   const title = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]?.trim() || null
   const text = html
@@ -173,6 +181,49 @@ function htmlParaTexto(html: string): { title: string | null; text: string } {
   return { title, text }
 }
 
+function charsetDoContentType(contentType: string): string {
+  const raw = /charset=([^;]+)/i.exec(contentType)?.[1]?.trim() ?? ""
+  return raw.replace(/^["']|["']$/g, "").toLowerCase() || "utf-8"
+}
+
+/** Lê o corpo em STREAMING com corte rígido: a URL vem do modelo, então um
+ * link para um arquivo gigante (ou resposta chunked infinita) não pode ir
+ * inteiro para o heap — nem passar pelas regex de htmlParaTexto. */
+async function lerCorpoLimitado(
+  res: Response,
+  maxBytes: number,
+  contentType: string,
+): Promise<{ bruto: string; cortadoNoDownload: boolean }> {
+  if (!res.body) return { bruto: "", cortadoNoDownload: false }
+  let decoder: TextDecoder
+  try {
+    decoder = new TextDecoder(charsetDoContentType(contentType))
+  } catch {
+    decoder = new TextDecoder("utf-8")
+  }
+  const reader = res.body.getReader()
+  let bruto = ""
+  let bytes = 0
+  let cortadoNoDownload = false
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (!value) continue
+      bytes += value.byteLength
+      bruto += decoder.decode(value, { stream: true })
+      if (bytes >= maxBytes) {
+        cortadoNoDownload = true
+        break
+      }
+    }
+    if (!cortadoNoDownload) bruto += decoder.decode()
+  } finally {
+    await reader.cancel().catch(() => undefined)
+  }
+  return { bruto, cortadoNoDownload }
+}
+
 interface SearxResult {
   title?: string
   url?: string
@@ -184,6 +235,7 @@ interface SearxResult {
 async function executarBusca(
   base: string,
   input: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const q = String(input.q ?? "").trim()
   if (!q) throw new Error("q é obrigatório")
@@ -213,7 +265,7 @@ async function executarBusca(
   }
 
   const res = await fetch(url, {
-    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+    signal: comDeadline(SEARCH_TIMEOUT_MS, signal),
     headers: { Accept: "application/json" },
   })
   if (!res.ok) {
@@ -239,7 +291,10 @@ async function executarBusca(
   }
 }
 
-async function executarFetch(input: Record<string, unknown>): Promise<unknown> {
+async function executarFetch(
+  input: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<unknown> {
   const raw = String(input.url ?? "").trim()
   let url: URL
   try {
@@ -259,36 +314,67 @@ async function executarFetch(input: Record<string, unknown>): Promise<unknown> {
   )
 
   const res = await fetch(url, {
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal: comDeadline(FETCH_TIMEOUT_MS, signal),
     redirect: "follow",
     headers: {
       "User-Agent": "Mozilla/5.0 (compatible; DexterBot/1.0; +https://dexter.gowork.com.br)",
       Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
     },
   })
-  if (!res.ok) throw new Error(`Página respondeu ${res.status} ${res.statusText}`)
+  // Todo caminho que desiste da resposta cancela o corpo: sem isso o body fica
+  // pendente (socket preso até o GC) — e aqui o corpo descartado pode ser um
+  // binário de vários GB.
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => undefined)
+    throw new Error(`Página respondeu ${res.status} ${res.statusText}`)
+  }
 
   const contentType = res.headers.get("content-type") ?? ""
   if (!/text\/|json|xml/i.test(contentType)) {
+    await res.body?.cancel().catch(() => undefined)
     throw new Error(`Conteúdo não textual (${contentType}) — não dá para ler como página.`)
   }
 
-  const bruto = await res.text()
+  const declarado = Number(res.headers.get("content-length"))
+  if (Number.isFinite(declarado) && declarado > FETCH_MAX_BYTES) {
+    await res.body?.cancel().catch(() => undefined)
+    throw new Error(
+      `Página muito grande para ler (${Math.round(declarado / 1_000_000)} MB).`,
+    )
+  }
+
+  // Em HTML a proporção markup:texto útil é imprevisível (head, scripts e
+  // style inline sozinhos passam de 100 KB), então o teto é só o absoluto —
+  // o corte por chars acontece depois, no texto extraído. Em texto puro/JSON
+  // um teto proporcional já basta.
+  const { bruto, cortadoNoDownload } = await lerCorpoLimitado(
+    res,
+    /html|xml/i.test(contentType)
+      ? FETCH_MAX_BYTES
+      : Math.min(maxChars * 4, FETCH_MAX_BYTES),
+    contentType,
+  )
   const { title, text } = /html/i.test(contentType)
     ? htmlParaTexto(bruto)
     : { title: null, text: bruto }
   const cortado = text.length > maxChars
+  const aviso = cortado
+    ? `texto cortado em ${maxChars} chars (lido ${text.length})`
+    : cortadoNoDownload
+      ? "download interrompido no limite de tamanho — conteúdo parcial"
+      : null
   return {
     url: res.url,
     ...(title ? { titulo: title } : {}),
     conteudo: cortado ? text.slice(0, maxChars) : text,
-    ...(cortado ? { aviso: `texto cortado em ${maxChars} chars (original ${text.length})` } : {}),
+    ...(aviso ? { aviso } : {}),
   }
 }
 
 export async function executeWebTool(
   name: string,
   input: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<{ ok: boolean; slug: string; fn: string; result?: unknown; error?: string }> {
   const fn = name.slice(WEB_TOOL_PREFIX.length)
   const base = await resolveSearxBase()
@@ -297,10 +383,10 @@ export async function executeWebTool(
   }
   try {
     if (fn === "search") {
-      return { ok: true, slug: "web", fn, result: await executarBusca(base, input) }
+      return { ok: true, slug: "web", fn, result: await executarBusca(base, input, signal) }
     }
     if (fn === "fetch") {
-      return { ok: true, slug: "web", fn, result: await executarFetch(input) }
+      return { ok: true, slug: "web", fn, result: await executarFetch(input, signal) }
     }
     return { ok: false, slug: "web", fn, error: `função web desconhecida: ${fn}` }
   } catch (err) {

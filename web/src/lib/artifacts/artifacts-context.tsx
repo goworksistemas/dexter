@@ -4,6 +4,7 @@
  * NUNCA colado na bolha da mensagem do usuário.
  */
 import * as React from "react"
+import { toast } from "sonner"
 
 import { useAuth } from "@/providers/auth-provider"
 import {
@@ -64,30 +65,49 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
   const [active, setActive] = React.useState<OpenArtifactInput | null>(null)
   const [isPanelOpen, setIsPanelOpen] = React.useState(false)
 
-  const refresh = React.useCallback(() => {
-    if (!chatId || !isAuthenticated) {
-      setArtifacts([])
-      return
-    }
-    setIsLoading(true)
-    fetchArtifactsForChat(chatId)
-      .then((lista) => {
-        setArtifacts(lista)
-        // Marca no DB os que a heurística detecta (sem apagar).
-        for (const a of lista) {
-          if (!a.is_truncated && looksTruncated(a.kind, a.content)) {
-            void markArtifactTruncated(a.id)
+  /** Conversa atual para descartar respostas de fetches de conversas antigas. */
+  const chatIdRef = React.useRef<string | null>(chatId)
+  chatIdRef.current = chatId
+
+  const refresh = React.useCallback(
+    (signal?: AbortSignal) => {
+      const requestedChatId = chatId
+      if (!requestedChatId || !isAuthenticated) {
+        setArtifacts([])
+        setIsLoading(false)
+        return
+      }
+      setIsLoading(true)
+      fetchArtifactsForChat(requestedChatId, signal)
+        .then((lista) => {
+          // Resposta atrasada da conversa anterior não pode vazar para a atual
+          // (a lista alimenta context.artifacts, ou seja, o system prompt).
+          if (signal?.aborted || chatIdRef.current !== requestedChatId) return
+          setArtifacts(lista)
+          // Marca no DB os que a heurística detecta (sem apagar).
+          for (const a of lista) {
+            if (!a.is_truncated && looksTruncated(a.kind, a.content)) {
+              void markArtifactTruncated(a.id)
+            }
           }
-        }
-      })
-      .catch((err) => {
-        console.error("Falha ao carregar artefatos:", err)
-      })
-      .finally(() => setIsLoading(false))
-  }, [chatId, isAuthenticated])
+        })
+        .catch((err) => {
+          if (signal?.aborted) return
+          console.error("Falha ao carregar artefatos:", err)
+        })
+        .finally(() => {
+          // Um refresh mais novo já assumiu o spinner.
+          if (signal?.aborted || chatIdRef.current !== requestedChatId) return
+          setIsLoading(false)
+        })
+    },
+    [chatId, isAuthenticated],
+  )
 
   React.useEffect(() => {
-    refresh()
+    const controller = new AbortController()
+    refresh(controller.signal)
+    return () => controller.abort()
   }, [refresh])
 
   React.useEffect(() => {
@@ -175,7 +195,7 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
     [active, chatId],
   )
 
-  const ensureFromBlock = React.useCallback(
+  const runEnsureFromBlock = React.useCallback(
     async (block: DetectedArtifactBlock, messageId?: string | null) => {
       if (!chatId) return
 
@@ -273,7 +293,10 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
           truncated: false,
         })
       } catch (err) {
-        console.warn("Artefato local (chat ainda sem persistência):", err)
+        console.warn("Falha ao persistir artefato:", err)
+        toast.error(
+          "Não foi possível salvar este artefato no servidor. As edições podem não ser mantidas.",
+        )
         openArtifact({
           sourceKey,
           kind: block.kind,
@@ -285,6 +308,33 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
       }
     },
     [artifacts, chatId, openArtifact],
+  )
+
+  /**
+   * Uma cadeia de upsert por (chat, kind): vários MessageBubble montando ao
+   * mesmo tempo usariam o mesmo source_key e estourariam a unique
+   * (chat_id, source_key) em paralelo.
+   */
+  const ensureQueueRef = React.useRef(new Map<string, Promise<void>>())
+
+  const ensureFromBlock = React.useCallback(
+    (block: DetectedArtifactBlock, messageId?: string | null): Promise<void> => {
+      if (!chatId) return Promise.resolve()
+      const key = `${chatId}:${block.kind}`
+      const queue = ensureQueueRef.current
+      const anterior = queue.get(key) ?? Promise.resolve()
+      const atual = anterior
+        .catch(() => undefined)
+        .then(() => runEnsureFromBlock(block, messageId))
+      queue.set(key, atual)
+      void atual
+        .catch(() => undefined)
+        .finally(() => {
+          if (queue.get(key) === atual) queue.delete(key)
+        })
+      return atual
+    },
+    [chatId, runEnsureFromBlock],
   )
 
   const getContextArtifacts = React.useCallback(() => {

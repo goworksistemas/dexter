@@ -5,26 +5,21 @@ export async function transcribeAudioBlob(
   opts?: { language?: string; signal?: AbortSignal },
 ): Promise<string> {
   const token = await getAccessToken()
-  const buffer = await blob.arrayBuffer()
-  const bytes = new Uint8Array(buffer)
-  let binary = ""
-  const chunk = 0x8000
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
-  }
-  const audioBase64 = btoa(binary)
+  const mimeType = blob.type || "audio/webm"
+
+  // multipart/form-data: o Blob vai cru, sem base64 — que inflava o payload
+  // ~33% e travava a thread principal convertendo o áudio acumulado.
+  // Os campos vêm ANTES do arquivo: o servidor lê o multipart em stream.
+  const form = new FormData()
+  form.append("mimeType", mimeType)
+  form.append("language", opts?.language ?? "pt")
+  form.append("file", blob, "audio")
 
   const response = await fetch("/api/transcribe", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({
-      audioBase64,
-      mimeType: blob.type || "audio/webm",
-      language: opts?.language ?? "pt",
-    }),
+    // Sem Content-Type manual: o browser gera o boundary do multipart.
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: form,
     signal: opts?.signal,
   })
 

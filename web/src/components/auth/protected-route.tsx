@@ -8,7 +8,10 @@ export function ProtectedRoute() {
   const { isAuthenticated, isLoading, isConfigured, user, signOut } = useAuth()
   const location = useLocation()
 
-  if (isLoading) {
+  // Sessão sem perfil ainda é carregamento: o perfil chega depois da sessão
+  // (auth-provider carrega em seguida), e avaliar o domínio antes disso faria
+  // piscar a tela de "Domínio não autorizado" em todo login.
+  if (isLoading || (isAuthenticated && !user)) {
     return (
       <div className="flex h-dvh items-center justify-center bg-background text-sm text-muted-foreground">
         Carregando sessão...
@@ -31,11 +34,11 @@ export function ProtectedRoute() {
     )
   }
 
-  if (!isAuthenticated) {
+  if (!isAuthenticated || !user) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
   }
 
-  if (!isAllowedEmail(user?.email)) {
+  if (!isAllowedEmail(user.email)) {
     return (
       <div className="flex h-dvh flex-col items-center justify-center gap-3 bg-background px-6 text-center">
         <p className="text-base font-medium text-foreground">
@@ -55,7 +58,7 @@ export function ProtectedRoute() {
     )
   }
 
-  if (user?.disabledAt) {
+  if (user.disabledAt) {
     return (
       <div className="flex h-dvh flex-col items-center justify-center gap-3 bg-background px-6 text-center">
         <p className="text-base font-medium text-foreground">

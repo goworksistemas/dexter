@@ -23,9 +23,12 @@ export function AuthLayout({
   children,
   footer,
 }: AuthLayoutProps) {
+  // min-h-dvh + my-auto: centraliza sem cortar o topo quando o card é mais alto
+  // que a viewport (tela baixa, teclado virtual aberto) — com `items-center` o
+  // excedente vaza para cima e o scroll não alcança.
   return (
-    <div className="flex h-dvh items-center justify-center overflow-y-auto bg-background px-4 py-10 [background-image:radial-gradient(ellipse_120%_80%_at_50%_-20%,color-mix(in_srgb,var(--primary)_14%,transparent),transparent_55%)]">
-      <div className="w-full max-w-md">
+    <div className="flex min-h-dvh justify-center overflow-y-auto bg-background px-4 py-10 [background-image:radial-gradient(ellipse_120%_80%_at_50%_-20%,color-mix(in_srgb,var(--primary)_14%,transparent),transparent_55%)]">
+      <div className="my-auto w-full max-w-md">
         <div className="mb-6 flex flex-col items-center gap-3 text-center">
           <Link to="/login" className="flex flex-col items-center gap-2">
             <img

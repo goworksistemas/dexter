@@ -21,6 +21,7 @@
 import Anthropic from "@anthropic-ai/sdk"
 
 import { config } from "../config.js"
+import { erroSanitizado } from "../lib/erro-modelo.js"
 import { responseMaxTokens } from "../llm/models.js"
 import type { ConnectorRuntime } from "../connectors/types.js"
 import { buildTools, describeTool, executeTool, type AnthropicTool } from "./tools.js"
@@ -374,7 +375,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       }
       if (estourado()) {
         endReason = "timeout"
-        throw new Error("Tempo máximo desta resposta esgotado.")
+        throw erroSanitizado("Tempo máximo desta resposta esgotado.")
       }
       if (tentativa > 0) status("Continuando a resposta")
 
@@ -456,7 +457,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         }
         if (estourado()) {
           endReason = "timeout"
-          throw new Error("Tempo máximo desta resposta esgotado.")
+          throw erroSanitizado("Tempo máximo desta resposta esgotado.")
         }
 
         final = await stream.finalMessage()
@@ -467,10 +468,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         }
         if (estourado() || (err instanceof Error && /timeout|AbortError/i.test(err.name + err.message))) {
           endReason = "timeout"
-          throw new Error("Tempo máximo desta resposta esgotado.")
+          throw erroSanitizado("Tempo máximo desta resposta esgotado.")
         }
         endReason = "api_error"
-        throw new Error(mensagemApiError(err))
+        throw erroSanitizado(mensagemApiError(err))
       }
 
       inputTokens += final.usage.input_tokens
@@ -487,7 +488,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
     if (!final) {
       endReason = "api_error"
-      throw new Error("O modelo não retornou mensagem.")
+      throw erroSanitizado("O modelo não retornou mensagem.")
     }
     return final
   }
@@ -615,6 +616,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
               email: opts.email,
               access: opts.access,
               connectors: opts.connectors,
+              signal: opts.signal,
             },
           )
           if (!exec.ok || isToolResultVazio(exec.result)) {

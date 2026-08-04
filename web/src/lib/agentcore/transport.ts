@@ -82,10 +82,7 @@ export class AgentCoreTransport implements ChatTransport {
     }
 
     if (!response.ok || !response.body) {
-      yield {
-        type: "error",
-        message: `AgentCore respondeu ${response.status} ${response.statusText}`,
-      };
+      yield { type: "error", message: await describeHttpError(response) };
       return;
     }
 
@@ -113,13 +110,42 @@ export class AgentCoreTransport implements ChatTransport {
           separatorIndex = buffer.indexOf("\n\n");
         }
       }
+
+      // Chegou aqui sem `done`: o servidor/proxy fechou no meio. Uma resposta
+      // cortada não pode ser settlada como concluída com sucesso.
+      if (!signal.aborted) {
+        yield {
+          type: "error",
+          message: "A conexão com o AgentCore caiu antes de a resposta terminar.",
+        };
+      }
     } catch (err) {
       if (signal.aborted) return;
       yield { type: "error", message: describeError(err) };
     } finally {
+      // Consumidor pode fechar o generator antes do fim (troca de conversa,
+      // run substituído) — sem cancel a conexão SSE fica pendurada no Fastify.
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore */
+      }
       reader.releaseLock();
     }
   }
+}
+
+/** Erro HTTP com a mensagem do corpo (`{message}`) quando o AgentCore manda. */
+async function describeHttpError(response: Response): Promise<string> {
+  if (response.status === 401) {
+    return "Sua sessão expirou. Entre novamente para continuar.";
+  }
+  const body = (await response.json().catch(() => null)) as {
+    message?: unknown;
+  } | null;
+  const message = typeof body?.message === "string" ? body.message.trim() : "";
+  if (message) return message;
+  return `AgentCore respondeu ${response.status} ${response.statusText}`;
 }
 
 /** Interpreta um bloco de evento SSE bruto (`event: x\ndata: y`) e devolve o

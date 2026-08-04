@@ -38,16 +38,35 @@ function parseRole(raw: unknown): DexterRole {
   return "user"
 }
 
+/**
+ * Rede pendurada não pode travar o bootstrap da sessão: o auth-provider espera
+ * este fetch antes de liberar a UI, e o ProtectedRoute trata sessão sem perfil
+ * como "Carregando sessão...". Menor que o timeout de bootstrap (8s).
+ */
+const PROFILE_TIMEOUT_MS = 6_000
+
 /** Carrega perfil da tabela public.profiles; fallback para user_metadata. */
 export async function fetchUserProfile(user: User): Promise<UserProfile> {
   const fallback = userToProfile(user)
   if (!supabase) return fallback
 
-  const { data, error } = await supabase
+  const query = supabase
     .from("profiles")
     .select("id, email, full_name, avatar_url, preferences, role, disabled_at")
     .eq("id", user.id)
     .maybeSingle()
+
+  let timer: number | undefined
+  const result = await Promise.race([
+    query,
+    new Promise<null>((resolve) => {
+      timer = window.setTimeout(() => resolve(null), PROFILE_TIMEOUT_MS)
+    }),
+  ])
+  if (timer !== undefined) window.clearTimeout(timer)
+  if (!result) return fallback
+
+  const { data, error } = result
 
   if (error || !data) return fallback
 
@@ -84,10 +103,11 @@ export async function ensureProfileFromUser(user: User): Promise<void> {
 /** Atualiza o nome exibido em profiles.full_name. */
 export async function updateProfileName(fullName: string): Promise<void> {
   if (!supabase) throw new Error("Supabase não configurado.")
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) throw new Error("Sessão inválida.")
+  // Sessão local (o client já faz auto-refresh) — evita um round-trip ao
+  // /auth/v1/user a cada save.
+  const { data: sessionData } = await supabase.auth.getSession()
+  const userId = sessionData.session?.user.id
+  if (!userId) throw new Error("Sessão inválida.")
 
   const trimmed = fullName.trim()
   if (!trimmed) throw new Error("Informe um nome.")
@@ -96,7 +116,7 @@ export async function updateProfileName(fullName: string): Promise<void> {
   const { error } = await supabase
     .from("profiles")
     .update({ full_name: trimmed })
-    .eq("id", user.id)
+    .eq("id", userId)
 
   if (error) throw new Error(error.message)
 }
@@ -106,15 +126,16 @@ export async function updateProfilePreferences(
   patch: UserPreferences,
 ): Promise<UserPreferences> {
   if (!supabase) throw new Error("Supabase não configurado.")
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
-  if (!user) throw new Error("Sessão inválida.")
+  // Sessão local (o client já faz auto-refresh) — evita um round-trip ao
+  // /auth/v1/user a cada save.
+  const { data: sessionData } = await supabase.auth.getSession()
+  const userId = sessionData.session?.user.id
+  if (!userId) throw new Error("Sessão inválida.")
 
   const { data: current, error: readErr } = await supabase
     .from("profiles")
     .select("preferences")
-    .eq("id", user.id)
+    .eq("id", userId)
     .maybeSingle()
 
   if (readErr) throw new Error(readErr.message)
@@ -132,7 +153,7 @@ export async function updateProfilePreferences(
   const { error } = await supabase
     .from("profiles")
     .update({ preferences: next })
-    .eq("id", user.id)
+    .eq("id", userId)
 
   if (error) throw new Error(error.message)
   return next

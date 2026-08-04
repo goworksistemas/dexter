@@ -31,7 +31,7 @@ export function SidebarSearch({
           }}
           placeholder="Buscar conversas"
           aria-label="Buscar conversas"
-          className="h-8 rounded-lg border-sidebar-border/70 bg-sidebar pr-8 pl-8 text-[13px] placeholder:text-sidebar-foreground/40"
+          className="h-8 rounded-lg border-sidebar-border/70 bg-sidebar pr-8 pl-8 text-[13px] placeholder:text-sidebar-foreground/60"
         />
         <button
           type="button"

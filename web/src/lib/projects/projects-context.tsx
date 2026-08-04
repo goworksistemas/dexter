@@ -91,13 +91,16 @@ export function ProjectsProvider({ children }: { children: React.ReactNode }) {
   const selectProject = React.useCallback(
     (id: string | null) => {
       setActiveProjectId(id)
-      skipUrlSyncRef.current = true
+      // A flag só pode ser armada quando há navegação — armada "à seca" ela
+      // engole a próxima mudança real de URL e dessincroniza o estado.
       if (id) {
         const target = `/p/${id}`
         if (location.pathname !== target) {
+          skipUrlSyncRef.current = true
           navigate(target, { replace: false })
         }
       } else if (location.pathname.startsWith("/p/")) {
+        skipUrlSyncRef.current = true
         navigate("/", { replace: false })
       }
     },

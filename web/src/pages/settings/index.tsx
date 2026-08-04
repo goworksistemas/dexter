@@ -44,7 +44,8 @@ export function SettingsPage() {
   const [password, setPassword] = useState("")
   const [passwordConfirm, setPasswordConfirm] = useState("")
   const [savingPassword, setSavingPassword] = useState(false)
-  const [savingTheme, setSavingTheme] = useState(false)
+  /** Tema em gravação (desabilita só o botão clicado, não o grupo). */
+  const [savingTheme, setSavingTheme] = useState<Theme | null>(null)
 
   const onSaveName = async (e: FormEvent) => {
     e.preventDefault()
@@ -61,17 +62,22 @@ export function SettingsPage() {
   }
 
   const onTheme = async (next: Theme) => {
+    if (next === theme) return
+    // Reverte se a gravação falhar: senão a aparência (e o localStorage) fica
+    // divergente do banco e o tema "volta sozinho" no próximo login.
+    const prev = theme
     setTheme(next)
-    setSavingTheme(true)
+    setSavingTheme(next)
     try {
       await updateProfileTheme(next)
       await refreshProfile()
     } catch (err) {
+      setTheme(prev)
       toast.error(
         err instanceof Error ? err.message : "Falha ao salvar preferência de tema.",
       )
     } finally {
-      setSavingTheme(false)
+      setSavingTheme(null)
     }
   }
 
@@ -182,7 +188,7 @@ export function SettingsPage() {
           <p className="text-sm text-muted-foreground">
             Preferência salva na sua conta (vale em qualquer dispositivo).
           </p>
-          <div className="flex flex-wrap gap-2">
+          <div role="group" aria-label="Tema da interface" className="flex flex-wrap gap-2">
             {THEMES.map(({ id, label, icon: Icon }) => (
               <Button
                 key={id}
@@ -190,7 +196,8 @@ export function SettingsPage() {
                 variant={theme === id ? "default" : "outline"}
                 size="sm"
                 className={cn("gap-1.5")}
-                disabled={savingTheme}
+                aria-pressed={theme === id}
+                disabled={savingTheme === id}
                 onClick={() => void onTheme(id)}
               >
                 <Icon className="size-3.5" />
