@@ -1122,17 +1122,17 @@ function Composer({
             )}
             aria-label={
               voice.isRecording
-                ? "Parar e transcrever"
+                ? "Parar ditado"
                 : voice.isTranscribing
-                  ? "Transcrevendo…"
-                  : "Ditar por voz"
+                  ? "Finalizando transcrição…"
+                  : "Ditar por voz (ao vivo)"
             }
             title={
               voice.isRecording
-                ? "Clique para parar — o texto aparece na hora"
+                ? "Clique para parar — o texto vai se corrigindo enquanto você fala"
                 : voice.isTranscribing
-                  ? "Transcrevendo o áudio…"
-                  : "Clique para ditar por voz"
+                  ? "Finalizando a transcrição…"
+                  : "Clique para falar — o texto aparece e se corrige ao vivo"
             }
             disabled={
               isRunning ||
