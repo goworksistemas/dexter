@@ -206,6 +206,8 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       tenantId: body.context?.tenantId,
       title,
       projectId: body.context?.projectId ?? null,
+      // Pina a conversa no modelo usado — troca global não afeta chats antigos.
+      model: body.context?.model,
     })
 
     // Texto limpo do usuário (sem apêndice legado de artefatos).

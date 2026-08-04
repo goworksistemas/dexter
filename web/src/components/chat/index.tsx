@@ -14,6 +14,7 @@ import { Thread } from "@/components/chat/thread"
 import { useArtifacts } from "@/lib/artifacts"
 import {
   useActiveChatProjectId,
+  useChatModel,
   useChats,
   useChatRunProgress,
   useChatRuns,
@@ -22,7 +23,6 @@ import {
 } from "@/lib/chats"
 import { runSnapshotToThreadMessages } from "@/lib/chats/chat-runs-store"
 import { truncateChatFromMessage } from "@/lib/chats/api"
-import { useModels } from "@/lib/models"
 import { useDexterRuntime } from "@/lib/runtime/use-dexter-runtime"
 import {
   usePendingAttachments,
@@ -59,7 +59,8 @@ export function ChatThread() {
     consumePendingFirstMessage,
   } = useChats()
   const projectId = useActiveChatProjectId()
-  const { selectedModelId } = useModels()
+  // Modelo POR CONVERSA: pinado no chat > default global (só p/ novas).
+  const { effectiveModelId } = useChatModel()
   const { startRun, cancelRun, getRun, subscribe } = useChatRuns()
   const storeRunning = useIsChatRunning(activeChatId)
   const runProgress = useChatRunProgress(activeChatId)
@@ -76,7 +77,7 @@ export function ChatThread() {
 
   const runtime = useDexterRuntime(
     activeChatId,
-    selectedModelId,
+    effectiveModelId,
     undefined,
     {
       attachmentsRef: pendingAttachments.ref,
@@ -140,7 +141,7 @@ export function ChatThread() {
           createdAt: new Date().toISOString(),
         },
       ],
-      model: selectedModelId,
+      model: effectiveModelId,
       projectId: pendente.projectId,
     })
     const snap = getRun(activeChatId)
@@ -152,7 +153,7 @@ export function ChatThread() {
     consumePendingFirstMessage,
     getRun,
     runtime,
-    selectedModelId,
+    effectiveModelId,
     startRun,
   ])
 
@@ -201,7 +202,7 @@ export function ChatThread() {
                 ? m.createdAt
                 : undefined,
         })),
-        model: selectedModelId,
+        model: effectiveModelId,
         projectId,
         artifacts: artifacts.length > 0 ? artifacts : undefined,
       })
@@ -216,7 +217,7 @@ export function ChatThread() {
       getRun,
       projectId,
       runtime,
-      selectedModelId,
+      effectiveModelId,
       startRun,
     ],
   )

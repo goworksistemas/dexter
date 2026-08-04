@@ -26,6 +26,8 @@ export interface UpsertChatParams {
   title?: string
   /** Só aplica em chat novo; chats existentes mantêm o project_id atual. */
   projectId?: string | null
+  /** Modelo (id do catálogo) usado neste run — a conversa fica pinada nele. */
+  model?: string
 }
 
 export interface InsertMessageParams {
@@ -44,6 +46,7 @@ export interface ChatSummary {
   title: string | null
   project_id: string | null
   updated_at: string
+  model: string | null
 }
 
 export interface StoredMessage {
@@ -124,6 +127,7 @@ export async function upsertChat(params: UpsertChatParams): Promise<void> {
   if (params.system !== undefined) row.system = params.system
   if (params.tenantId !== undefined) row.tenant_id = params.tenantId
   if (params.title !== undefined) row.title = params.title
+  if (params.model !== undefined) row.model = params.model
   // project_id só no insert (chat novo) — evita sobrescrever ao enviar mensagens
   if (ownership === "new" && params.projectId !== undefined) {
     row.project_id = params.projectId
@@ -204,7 +208,7 @@ export async function getChatToolCalls(
 export async function listChats(userId: string): Promise<ChatSummary[]> {
   const { data, error } = await supabase
     .from("agent_chats")
-    .select("id, title, project_id, updated_at")
+    .select("id, title, project_id, updated_at, model")
     .eq("user_id", userId)
     .order("updated_at", { ascending: false })
 
@@ -212,6 +216,29 @@ export async function listChats(userId: string): Promise<ChatSummary[]> {
     throw new Error(`listChats falhou: ${error.message}`)
   }
   return (data ?? []) as ChatSummary[]
+}
+
+/** Pina o modelo de UMA conversa (troca feita pelo usuário no seletor). */
+export async function setChatModel(
+  chatId: string,
+  userId: string,
+  model: string,
+): Promise<ChatSummary | null> {
+  const ownership = await assertChatOwnedOrNew(chatId, userId)
+  if (ownership === "new") return null
+
+  const { data, error } = await supabase
+    .from("agent_chats")
+    .update({ model, updated_at: new Date().toISOString() })
+    .eq("id", chatId)
+    .eq("user_id", userId)
+    .select("id, title, project_id, updated_at, model")
+    .single()
+
+  if (error) {
+    throw new Error(`setChatModel falhou: ${error.message}`)
+  }
+  return data as ChatSummary
 }
 
 /**
@@ -348,7 +375,7 @@ export async function renameChat(
     .update({ title: trimmed, updated_at: new Date().toISOString() })
     .eq("id", chatId)
     .eq("user_id", userId)
-    .select("id, title, project_id, updated_at")
+    .select("id, title, project_id, updated_at, model")
     .maybeSingle()
 
   if (error) {
@@ -378,7 +405,7 @@ export async function setChatProject(
     })
     .eq("id", chatId)
     .eq("user_id", userId)
-    .select("id, title, project_id, updated_at")
+    .select("id, title, project_id, updated_at, model")
     .maybeSingle()
 
   if (error) {

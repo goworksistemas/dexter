@@ -44,6 +44,19 @@ docker network connect dexter <nome-do-container-traefik>
 
 5. Deploy the stack.
 
+## Busca na internet (SearXNG)
+
+Zero config: a stack já sobe o `searxng` pronto (o `searxng-init` grava o
+settings com formato JSON e secret gerado) e o agentcore o descobre sozinho.
+Basta **Pull and redeploy** — nenhuma variável ou passo manual.
+
+Smoke: perguntar algo externo no chat (ex.: "qual a cotação do dólar hoje?") e
+ver o passo "Buscando na internet" no progresso.
+
+Se o SearXNG estiver fora do ar, as tools `web__search`/`web__fetch` somem
+sozinhas do catálogo (probe com cache de 60s) — o Dexter avisa que não
+consegue verificar na internet em vez de inventar.
+
 ## Atualizar
 
 Depois de um push em `main` (imagens novas no GHCR):

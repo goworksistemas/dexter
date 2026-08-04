@@ -9,6 +9,8 @@ export interface ChatSummary {
   title: string | null
   project_id: string | null
   updated_at: string
+  /** Modelo pinado nesta conversa (id do catálogo) — null segue o default. */
+  model: string | null
 }
 
 export interface ChatMessageRecord {

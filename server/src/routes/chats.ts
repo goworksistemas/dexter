@@ -13,6 +13,7 @@ import {
   getMessagesPage,
   listChats,
   renameChat,
+  setChatModel,
   setChatProject,
   truncateFromMessageId,
   truncateMessages,
@@ -27,10 +28,15 @@ const patchBodySchema = z
   .object({
     title: z.string().optional(),
     projectId: z.union([z.string().uuid(), z.null()]).optional(),
+    /** id do modelo (catálogo /api/models) — pina o modelo desta conversa. */
+    model: z.string().min(1).max(120).optional(),
   })
   .refine(
-    (b) => b.title !== undefined || b.projectId !== undefined,
-    { message: "Informe title e/ou projectId." },
+    (b) =>
+      b.title !== undefined ||
+      b.projectId !== undefined ||
+      b.model !== undefined,
+    { message: "Informe title, projectId e/ou model." },
   )
 
 function badRequest(message: string): Error {
@@ -111,10 +117,8 @@ export default async function chatsRoutes(app: FastifyInstance): Promise<void> {
       updated = await renameChat(request.params.id, userId, title)
     }
 
-    // Se só projectId foi enviado, updated já veio de setChatProject
-    if (parsed.data.projectId !== undefined && parsed.data.title === undefined) {
-      if (!updated) throw new NotFoundError("Conversa não encontrada.")
-      return updated
+    if (parsed.data.model !== undefined) {
+      updated = await setChatModel(request.params.id, userId, parsed.data.model)
     }
 
     if (!updated) {

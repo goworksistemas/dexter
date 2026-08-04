@@ -307,6 +307,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     connectors: opts.connectors,
     userId: opts.userId,
   })
+  // Tool server-side da Anthropic: a busca roda na API deles (com citações),
+  // não passa pelo executeTool local. Blocos vêm como server_tool_use.
+  const apiTools: unknown[] = [...tools]
+  if (config.WEB_SEARCH_ENABLED) {
+    apiTools.push({
+      type: "web_search_20250305",
+      name: "web_search",
+      max_uses: config.WEB_SEARCH_MAX_USES,
+    })
+  }
   const messages: Anthropic.MessageParam[] = [...opts.messages]
   const maxRounds = opts.maxRounds ?? config.AGENT_MAX_ROUNDS
   const maxSteps = opts.maxSteps ?? config.AGENT_MAX_STEPS
@@ -382,7 +392,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           max_tokens: maxTokens,
           system: opts.systemPrompt,
           messages,
-          ...(params.allowTools && tools.length > 0 ? { tools } : {}),
+          ...(params.allowTools && apiTools.length > 0
+            ? { tools: apiTools as Anthropic.Messages.ToolUnion[] }
+            : {}),
         },
         signal ? { signal } : undefined,
       )
@@ -420,12 +432,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
             }
             continue
           }
-          if (
-            event.type === "content_block_start" &&
-            event.content_block.type === "tool_use"
-          ) {
-            const { systemLabel, slug } = describeTool(event.content_block.name)
-            status(`Preparando consulta em ${systemLabel ?? slug ?? "sistema"}`)
+          if (event.type === "content_block_start") {
+            const block = event.content_block as { type: string; name?: string }
+            if (block.type === "tool_use" && block.name) {
+              const { systemLabel, slug } = describeTool(block.name)
+              status(`Preparando consulta em ${systemLabel ?? slug ?? "sistema"}`)
+            } else if (block.type === "server_tool_use") {
+              status("Buscando na internet")
+            } else if (block.type === "web_search_tool_result") {
+              status("Lendo resultados da web")
+            }
           }
         }
 
@@ -506,7 +522,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         break
       }
 
-      const allowTools = step < maxSteps && tools.length > 0
+      const allowTools = step < maxSteps && apiTools.length > 0
       status(
         round === 0
           ? "Pensando"
@@ -516,6 +532,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       )
 
       const final = await streamTurn({ allowTools })
+
+      // Busca web server-side pode pausar o turno no meio (pause_turn):
+      // devolve o conteúdo como está e continua na próxima rodada.
+      if (final.stop_reason === "pause_turn") {
+        messages.push({ role: "assistant", content: final.content })
+        continue
+      }
 
       const toolUses = final.content.filter(
         (c): c is Anthropic.ToolUseBlock => c.type === "tool_use",

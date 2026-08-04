@@ -17,6 +17,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { useChatModel } from "@/lib/chats"
 import { useModels, modelCaps } from "@/lib/models"
 import { cn } from "@/lib/utils"
 
@@ -51,9 +52,15 @@ function CapChips({
 export function ModelSelector({
   className,
   align = "end",
+  scope = "chat",
 }: {
   className?: string
   align?: "start" | "center" | "end"
+  /**
+   * "chat": segue o modelo pinado da conversa ativa; trocar pina SÓ ela.
+   * "new": composer fora do chat (ex.: projeto) — sempre o default global.
+   */
+  scope?: "chat" | "new"
 }) {
   const {
     models,
@@ -64,8 +71,12 @@ export function ModelSelector({
     selectModel,
     refreshModels,
   } = useModels()
+  const { effectiveModelId, selectModelForChat } = useChatModel()
 
-  const modeloAtivo = models.find((m) => m.id === selectedModelId)
+  const activeModelId = scope === "chat" ? effectiveModelId : selectedModelId
+  const onSelect = scope === "chat" ? selectModelForChat : selectModel
+
+  const modeloAtivo = models.find((m) => m.id === activeModelId)
   const nenhumOnline = !isLoading && !error && models.length === 0
 
   if (nenhumOnline || error) {
@@ -131,12 +142,12 @@ export function ModelSelector({
         className="w-[min(22rem,calc(100vw-2rem))]"
       >
         {models.map((model) => {
-          const selected = model.id === selectedModelId
+          const selected = model.id === activeModelId
           const caps = modelCaps(model)
           return (
             <DropdownMenuItem
               key={model.id}
-              onSelect={() => selectModel(model.id)}
+              onSelect={() => onSelect(model.id)}
               className="items-start gap-3 py-2.5"
             >
               <span className="min-w-0 flex-1">

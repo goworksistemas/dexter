@@ -20,6 +20,7 @@ import {
   fetchChats,
   moveChatToProject as moveChatToProjectApi,
   renameChat as renameChatApi,
+  setChatModel as setChatModelApi,
 } from "./api"
 import { chatRunsStore, runSnapshotToThreadMessages } from "./chat-runs-store"
 import {
@@ -65,6 +66,8 @@ interface ChatsContextValue {
   ) => { text: string; projectId: string | null } | null
   selectChat: (id: string) => void
   renameChat: (id: string, title: string) => Promise<void>
+  /** Pina o modelo de UMA conversa existente — não vaza para as outras. */
+  setChatModel: (id: string, model: string) => Promise<void>
   deleteChat: (id: string) => Promise<void>
   moveChatToProject: (id: string, projectId: string | null) => Promise<void>
   refreshChats: () => void
@@ -547,6 +550,17 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
     )
   }, [])
 
+  const setChatModel = React.useCallback(async (id: string, model: string) => {
+    // Otimista: o seletor reflete a troca na hora; o PATCH confirma atrás.
+    setChats((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, model } : c)),
+    )
+    const updated = await setChatModelApi(id, model)
+    setChats((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, ...updated } : c)),
+    )
+  }, [])
+
   const deleteChat = React.useCallback(
     async (id: string) => {
       chatRunsStore.cancelRun(id)
@@ -599,6 +613,7 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
       consumePendingFirstMessage,
       selectChat,
       renameChat,
+      setChatModel,
       deleteChat,
       moveChatToProject,
       refreshChats,
@@ -622,6 +637,7 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
       consumePendingFirstMessage,
       selectChat,
       renameChat,
+      setChatModel,
       deleteChat,
       moveChatToProject,
       refreshChats,

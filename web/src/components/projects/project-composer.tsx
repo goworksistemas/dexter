@@ -66,7 +66,7 @@ export function ProjectComposer({
           </span>
         </p>
         <div className="flex shrink-0 items-center gap-0.5">
-          <ModelSelector />
+          <ModelSelector scope="new" />
           <Button
             type="submit"
             size="icon"

@@ -77,6 +77,25 @@ const schema = z.object({
   /** Room for dossiê (schema + SQLs densos) without cutting mid-investigation. */
   AGENT_MAX_STEPS: z.coerce.number().int().positive().default(28),
   AGENT_MAX_ROUNDS: z.coerce.number().int().positive().default(14),
+
+  /**
+   * Busca na internet GRATUITA via SearXNG self-hosted (todos os modelos).
+   * Ex.: https://searx.gowork.com.br — habilita as tools web__search/web__fetch.
+   * settings.yml do SearXNG precisa de `search.formats: [html, json]`.
+   */
+  SEARXNG_BASE_URL: z.string().url().optional(),
+
+  /**
+   * Busca nativa da Anthropic (server-side, PAGA: ~US$10/1k buscas na
+   * ANTHROPIC_API_KEY; só modelos Claude). Desligada por default — o caminho
+   * padrão é o SearXNG acima. Ligue só se quiser as citações nativas.
+   */
+  WEB_SEARCH_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+  /** Máximo de buscas nativas por resposta (contém custo/latência). */
+  WEB_SEARCH_MAX_USES: z.coerce.number().int().positive().default(5),
   AGENT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(480_000),
   AGENT_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   /** Teto do tool_result no contexto. Notion MCP (schema/markdown) precisa de folga. */

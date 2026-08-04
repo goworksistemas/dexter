@@ -13,6 +13,7 @@ export {
   useIsChatRunning,
 } from "./chat-runs-context"
 export { useChatStepsHistory } from "./use-chat-steps"
+export { useChatModel } from "./use-chat-model"
 export { formatarDuracao } from "./run-steps"
 export type { RunProgress, RunStep, RunStepStatus } from "./run-steps"
 export type { ChatMessageRecord, ChatSummary } from "./types"

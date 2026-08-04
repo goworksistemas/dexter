@@ -11,6 +11,9 @@ services:
       # Só bootstrap Infisical (Machine Identity / Service Token) — secrets de app vêm do vault
       INFISICAL_TOKEN: ${INFISICAL_TOKEN}
       REDIS_URL: redis://redis:6379
+      # Busca na internet (tools web__search/web__fetch) — o backend também
+      # descobre sozinho, mas deixamos explícito.
+      SEARXNG_BASE_URL: http://searxng:8080
     depends_on:
       redis:
         condition: service_healthy
@@ -63,8 +66,49 @@ services:
       timeout: 3s
       retries: 5
 
+  # Busca na internet do Dexter (tools web__search/web__fetch) — gratuita,
+  # zero config: o init grava o settings.yml (formato json + secret gerado)
+  # e o serviço sobe pronto. Só na rede interna.
+  searxng-init:
+    image: alpine:3.20
+    container_name: dexter-searxng-init
+    command:
+      - sh
+      - -c
+      - |
+        if [ ! -f /etc/searxng/settings.yml ]; then
+          KEY=$$(head -c 32 /dev/urandom | sha256sum | cut -d' ' -f1)
+          printf 'use_default_settings: true\nserver:\n  secret_key: "%s"\n  limiter: false\nsearch:\n  formats:\n    - html\n    - json\n' "$$KEY" > /etc/searxng/settings.yml
+        fi
+    volumes:
+      - searxng-config:/etc/searxng
+    restart: "no"
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: dexter-searxng
+    restart: unless-stopped
+    depends_on:
+      searxng-init:
+        condition: service_completed_successfully
+    volumes:
+      - searxng-config:/etc/searxng
+    networks:
+      - internal
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://localhost:8080/healthz || exit 1",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
 volumes:
   redis-data:
+  searxng-config:
 
 networks:
   internal:

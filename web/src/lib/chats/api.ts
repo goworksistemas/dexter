@@ -153,6 +153,27 @@ export async function renameChat(
 }
 
 /** Move conversa para um projeto (`projectId` null = sem projeto). */
+/** Pina o modelo da conversa — só afeta ESTA conversa. */
+export async function setChatModel(
+  chatId: string,
+  model: string,
+): Promise<ChatSummary> {
+  const response = await fetch(`${BASE_URL}/chats/${chatId}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await authHeaders()),
+    },
+    body: JSON.stringify({ model }),
+  })
+  if (!response.ok) {
+    if (response.status === 404) throw new Error("Conversa não encontrada.")
+    if (response.status === 403) throw new Error("Sem permissão para esta conversa.")
+    throw new Error(`PATCH /api/chats/${chatId} respondeu ${response.status}`)
+  }
+  return response.json()
+}
+
 export async function moveChatToProject(
   chatId: string,
   projectId: string | null,

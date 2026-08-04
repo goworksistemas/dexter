@@ -21,6 +21,12 @@ import { callSystemRpc } from "./client.js"
 import { SYSTEMS } from "./registry.js"
 import { canAccess, type SystemAccess } from "./access.js"
 import type { AnthropicTool } from "./tool-types.js"
+import {
+  buildWebTools,
+  describeWebTool,
+  executeWebTool,
+  isWebToolName,
+} from "./web-search.js"
 
 export type { AnthropicTool } from "./tool-types.js"
 
@@ -79,6 +85,7 @@ export async function buildTools(
   if (runtime) {
     tools.push(...(await buildConnectorTools(runtime, { userId })))
   }
+  tools.push(...(await buildWebTools()))
   return tools
 }
 
@@ -93,6 +100,9 @@ export interface ToolDescription {
 
 /** Traduz o nome técnico da tool em rótulos legíveis (para o progresso na UI). */
 export function describeTool(name: string): ToolDescription {
+  if (isWebToolName(name)) {
+    return describeWebTool(name)
+  }
   if (isConnectorToolName(name)) {
     return describeConnectorTool(name)
   }
@@ -130,6 +140,9 @@ export async function executeTool(
     connectors?: ConnectorRuntime
   },
 ): Promise<ToolExecution> {
+  if (isWebToolName(name)) {
+    return executeWebTool(name, input)
+  }
   if (isConnectorToolName(name)) {
     if (!ctx.connectors) {
       return { ok: false, error: "conectores não resolvidos nesta sessão" }
