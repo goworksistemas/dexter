@@ -103,15 +103,18 @@ const PROMPT_CONTINUACAO =
 
 const PROMPT_FINAL_FORCADO =
   "Você atingiu o limite de consultas/ferramentas nesta resposta. " +
-  "Com o que já coletou nas tools acima, escreva AGORA a resposta final completa " +
-  "ao usuário em português — análise, exemplos e detalhes pedidos. " +
-  "NÃO chame mais tools. Se faltar dado, diga o que falta e o que já conseguiu apurar."
+  "Com o que já coletou nas tools acima, escreva AGORA a resposta final COMPLETA " +
+  "e DETALHADA ao usuário em português: fatos com números/campos reais, vínculos, " +
+  "interpretação e recomendação se couber. Use tabelas markdown quando houver dados. " +
+  "NÃO chame mais tools. NÃO invente o que não veio nas tools. " +
+  "Se faltar dado crítico, diga exatamente o que falta e o que já apurou."
 
 const PROMPT_FECHAR_RESPOSTA =
-  "Você narrou que ia buscar dados ou parou sem fechar a resposta. " +
-  "Com o que as tools acima já retornaram, escreva AGORA a resposta final completa " +
-  "em português com números concretos (ou diga claramente o que faltou e o escopo). " +
-  "NÃO chame mais tools. Não repita preâmbulos do tipo 'deixa eu puxar' / 'vou buscar'."
+  "Você narrou intenção ou parou sem fechar. " +
+  "Com o que as tools acima já retornaram, escreva AGORA a resposta final COMPLETA " +
+  "e DETALHADA em português (fatos + escopo + conclusão acionável). " +
+  "NÃO chame mais tools. NÃO invente. Não repita preâmbulos " +
+  "('deixa eu puxar' / 'vou buscar' / 'um momento')."
 
 /** Texto que parece intenção/preâmbulo sem conclusão — comum após tools. */
 function respostaIncompleta(texto: string, teveTools: boolean): boolean {
@@ -119,12 +122,24 @@ function respostaIncompleta(texto: string, teveTools: boolean): boolean {
   const t = texto.trim()
   if (!t) return true
   const narracao =
-    /^(deixa eu|vou (puxar|buscar|consultar|verificar)|um momento|aguarde|já (volto|pego))/i.test(
+    /^(deixa eu|vou (puxar|buscar|consultar|verificar|olhar|checar)|um momento|aguarde|já (volto|pego)|ok[,!]?\s*(vou|deixa))/i.test(
       t,
     ) ||
-    /(deixa eu puxar|números certos|vou (consultar|buscar|puxar)|já busco)/i.test(t)
-  if (narracao && t.length < 500) return true
-  if (/(\.{3}|…)\s*$/.test(t) && t.length < 220 && !/\b\d+\b/.test(t)) {
+    /(deixa eu puxar|números certos|vou (consultar|buscar|puxar|verificar)|já busco|em seguida (vou|busco)|agora (vou|busco))/i.test(
+      t,
+    )
+  if (narracao && t.length < 700) return true
+  if (/(\.{3}|…)\s*$/.test(t) && t.length < 280 && !/\b\d+\b/.test(t)) {
+    return true
+  }
+  // Narrativa de progresso entre tools sem dossiê/tabela/números densos.
+  if (
+    teveTools &&
+    t.length < 400 &&
+    /^(encontrei|pronto|aqui está|vou |agora )/i.test(t) &&
+    !/\|.+\|/.test(t) &&
+    (t.match(/\b\d+\b/g)?.length ?? 0) < 2
+  ) {
     return true
   }
   return false

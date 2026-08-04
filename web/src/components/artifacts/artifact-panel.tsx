@@ -26,6 +26,30 @@ import { cn } from "@/lib/utils"
  */
 export const ARTIFACT_SPLIT_QUERY = "(min-width: 64rem)"
 
+/**
+ * Largura do split é preferência POR DISPOSITIVO (depende do monitor), então
+ * localStorage é o lugar certo — não sincroniza entre máquinas de propósito.
+ */
+const PANEL_WIDTH_KEY = "dexter.artifactPanel.width"
+/** Painel nunca menor que isso (toolbar não quebra). */
+const PANEL_MIN_WIDTH = 360
+/** Chat mantém pelo menos isso ao arrastar. */
+const CHAT_MIN_WIDTH = 420
+
+function readStoredWidth(): number | null {
+  try {
+    const n = Number(window.localStorage.getItem(PANEL_WIDTH_KEY))
+    return Number.isFinite(n) && n >= PANEL_MIN_WIDTH ? n : null
+  } catch {
+    return null
+  }
+}
+
+function clampPanelWidth(w: number): number {
+  const max = Math.max(PANEL_MIN_WIDTH, window.innerWidth - CHAT_MIN_WIDTH)
+  return Math.min(Math.max(Math.round(w), PANEL_MIN_WIDTH), max)
+}
+
 /** CodeMirror só entra no bundle quando a aba de código é aberta. */
 const loadCodeEditor = () => import("@/components/artifacts/code-editor")
 const CodeEditor = React.lazy(() =>
@@ -41,8 +65,42 @@ export function ArtifactPanel() {
   const [saving, setSaving] = React.useState(false)
   const [formatting, setFormatting] = React.useState(false)
   const isSplit = useMediaQuery(ARTIFACT_SPLIT_QUERY)
+  const [panelWidth, setPanelWidth] = React.useState<number | null>(readStoredWidth)
+  const [resizing, setResizing] = React.useState(false)
 
   const openedKeyRef = React.useRef<string | null>(null)
+
+  React.useEffect(() => {
+    if (resizing || panelWidth == null) return
+    try {
+      window.localStorage.setItem(PANEL_WIDTH_KEY, String(panelWidth))
+    } catch {
+      /* storage cheio/bloqueado: largura só não persiste */
+    }
+  }, [panelWidth, resizing])
+
+  const startResize = React.useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!isSplit || e.button !== 0) return
+      e.preventDefault()
+      setResizing(true)
+      document.body.style.cursor = "col-resize"
+      const onMove = (ev: PointerEvent) => {
+        setPanelWidth(clampPanelWidth(window.innerWidth - ev.clientX))
+      }
+      const onUp = () => {
+        setResizing(false)
+        document.body.style.removeProperty("cursor")
+        window.removeEventListener("pointermove", onMove)
+        window.removeEventListener("pointerup", onUp)
+        window.removeEventListener("pointercancel", onUp)
+      }
+      window.addEventListener("pointermove", onMove)
+      window.addEventListener("pointerup", onUp)
+      window.addEventListener("pointercancel", onUp)
+    },
+    [isSplit],
+  )
 
   const language = React.useMemo(
     () => (active ? languageForArtifact(active.kind, active.content) : "markdown"),
@@ -212,13 +270,31 @@ export function ArtifactPanel() {
       role={isSplit ? undefined : "dialog"}
       aria-modal={isSplit ? undefined : true}
       aria-label="Painel do artefato"
+      style={isSplit && panelWidth != null ? { width: panelWidth } : undefined}
       className={cn(
         "flex min-h-0 flex-col bg-card text-card-foreground",
         // Abaixo de lg o painel sai do fluxo: o chat mantém a largura inteira.
         "fixed inset-0 z-30 h-dvh w-full",
-        "lg:static lg:z-auto lg:h-full lg:w-[min(48%,36rem)] lg:max-w-xl lg:border-l lg:border-border/70",
+        "lg:relative lg:z-auto lg:h-full lg:shrink-0 lg:border-l lg:border-border/70",
+        // Largura default só até o usuário arrastar (aí vale o style acima).
+        panelWidth == null && "lg:w-[min(48%,36rem)] lg:max-w-xl",
       )}
     >
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Redimensionar painel do artefato"
+        title="Arraste para redimensionar · duplo clique restaura"
+        onPointerDown={startResize}
+        onDoubleClick={() => setPanelWidth(null)}
+        className={cn(
+          "absolute inset-y-0 -left-1 z-20 hidden w-2 cursor-col-resize lg:block",
+          "after:absolute after:inset-y-0 after:left-1/2 after:w-px after:-translate-x-1/2 after:transition-colors",
+          resizing
+            ? "after:w-[3px] after:bg-primary"
+            : "hover:after:w-[3px] hover:after:bg-primary/50",
+        )}
+      />
       <div className="flex shrink-0 flex-col gap-2 border-b border-border/60 px-2 py-2 lg:gap-1.5 lg:px-3">
         <div className="relative min-w-0">
           <input
@@ -317,7 +393,13 @@ export function ArtifactPanel() {
         </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col p-2 lg:p-3">
+      <div
+        className={cn(
+          "flex min-h-0 flex-1 flex-col p-2 lg:p-3",
+          // Iframe do preview engoliria o pointermove no meio do arraste.
+          resizing && "pointer-events-none select-none",
+        )}
+      >
         {tab === "preview" ? (
           active.kind === "html" ? (
             <HtmlPreview html={draft} />

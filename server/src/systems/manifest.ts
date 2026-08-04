@@ -63,9 +63,9 @@ export const SYSTEM_TOOLS: Record<string, SystemTool[]> = {
     {
       fn: "dexter_tickets_busca",
       label: "Buscar tickets",
-      description: "Busca chamados por solicitante/responsável (nome), texto no título/descrição, status, prédio, empresa (cadastro). NÃO use p_texto sozinho para 'quantos chamados da empresa X' — use p_empresa ou p_company_id (FK). Retorna total_encontrado (count real) + itens (amostra cap 50). Histórico: p_dias=0.",
+      description: "Busca chamados por código (ticket_number N####), título/descrição, solicitante/responsável (nome), status, prédio, empresa (cadastro). p_texto casa também em ticket_number — use N6324 direto. Pessoas = public.profiles (user_id/assigned_to/agent_id), NÃO public.users. Para ANALISAR 1 chamado: após achar, use dexter_sql denso (descrição, joins, histórico do cliente). NÃO use p_texto sozinho para totais por empresa — use p_empresa/p_company_id. Retorna total_encontrado + itens (cap 50). Histórico: p_dias=0.",
       params: [
-        { name: "p_texto", type: "string", description: "Texto no título/descrição (ilike). Opcional. NÃO substitui filtro por empresa." },
+        { name: "p_texto", type: "string", description: "Código (N6324), título ou descrição (ilike em ticket_number/title/description). Opcional. NÃO substitui filtro por empresa." },
         { name: "p_solicitante", type: "string", description: "Nome de quem abriu (ilike). Opcional." },
         { name: "p_responsavel", type: "string", description: "Nome do responsável/agente (ilike). Opcional." },
         { name: "p_status", type: "string", description: "Status (ilike). Opcional." },
@@ -79,9 +79,9 @@ export const SYSTEM_TOOLS: Record<string, SystemTool[]> = {
     {
       fn: "dexter_os_busca",
       label: "Buscar OS",
-      description: "Busca ordens de serviço por solicitante/executor (nome), texto, status, prédio. Total real + lista.",
+      description: "Busca ordens de serviço por número (service_order_number), solicitante/executor (nome), texto, status, prédio. Total real + lista.",
       params: [
-        { name: "p_texto", type: "string", description: "Texto (ilike). Opcional." },
+        { name: "p_texto", type: "string", description: "Número da OS, título ou descrição (ilike). Opcional." },
         { name: "p_solicitante", type: "string", description: "Nome do solicitante (ilike). Opcional." },
         { name: "p_responsavel", type: "string", description: "Nome do executor/designado (ilike). Opcional." },
         { name: "p_status", type: "string", description: "Status (ilike). Opcional." },

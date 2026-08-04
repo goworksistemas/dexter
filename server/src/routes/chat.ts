@@ -117,15 +117,13 @@ function buildSystemPrompt(
   prompt +=
     "\n\n## Acesso deste usuário aos sistemas GoWork\n" +
     accessSummary(access) +
-    "\n\nRegras de dados:\n" +
-    "- Para responder sobre dados de um sistema que o usuário acessa, USE as tools (elas retornam o dado real, já no escopo dele).\n" +
-    "- Prefira tools especializadas quando couberem; senão schema→SQL cobre qualquer tabela read-only.\n" +
-    "- Contagem por empresa/cliente/unidade: resolver cadastro (companies etc.) + contar via FK (company_id); NUNCA só p_texto no título.\n" +
-    "- Total exato = count(*) ou total_encontrado — NUNCA conte itens de lista truncada.\n" +
-    "- Se o usuário acessa o sistema, NÃO diga que não tem acesso/informação sem tentar schema→SQL.\n" +
-    "- NUNCA invente números, valores ou listas — só afirme o que as tools retornarem.\n" +
-    "- Se a tool retornar erro de acesso, ou o usuário perguntar sobre um sistema que ele NÃO acessa, diga que ele não tem acesso àquele dado.\n" +
-    "- Responda em português, de forma objetiva."
+    "\n\n## Lembrete operacional (esta conversa)\n" +
+    "- Dados só via tools dos sistemas listados acima; sem tool = não sabe.\n" +
+    "- Especializada se couber; senão schema→SQL. Zero alucinação; total ≠ lista truncada.\n" +
+    "- Análise/investigação = dossiê (fatos + vínculos + implicação). Proibido superficial.\n" +
+    "- NetworkGo pessoas = profiles (nunca public.users). Códigos N#### em ticket_number.\n" +
+    "- Sem acesso ao sistema ou sem_acesso → diga isso; caso contrário tente consultar.\n" +
+    "- Português, assertivo, detalhado quando o pedido for análise."
   if (connectors) {
     prompt += connectorsPromptBlock(connectors)
   }

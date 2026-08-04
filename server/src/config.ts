@@ -74,8 +74,9 @@ const schema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().default(60),
   RATE_LIMIT_WINDOW: z.string().default("1 minute"),
 
-  AGENT_MAX_STEPS: z.coerce.number().int().positive().default(20),
-  AGENT_MAX_ROUNDS: z.coerce.number().int().positive().default(12),
+  /** Room for dossiê (schema + SQLs densos) without cutting mid-investigation. */
+  AGENT_MAX_STEPS: z.coerce.number().int().positive().default(28),
+  AGENT_MAX_ROUNDS: z.coerce.number().int().positive().default(14),
   AGENT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(480_000),
   AGENT_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   /** Teto do tool_result no contexto. Notion MCP (schema/markdown) precisa de folga. */

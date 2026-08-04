@@ -722,7 +722,8 @@ begin
     and (p_solicitante is null or ps.full_name ilike '%' || p_solicitante || '%')
     and (p_responsavel is null or pa.full_name ilike '%' || p_responsavel || '%'
                                or pg.full_name ilike '%' || p_responsavel || '%')
-    and (p_texto is null or t.title ilike '%' || p_texto || '%'
+    and (p_texto is null or t.ticket_number ilike '%' || p_texto || '%'
+                         or t.title ilike '%' || p_texto || '%'
                          or t.description ilike '%' || p_texto || '%')
     and (p_company_id is null or t.company_id = p_company_id)
     and (p_empresa is null or exists (
@@ -769,7 +770,8 @@ begin
       and (p_solicitante is null or ps.full_name ilike '%' || p_solicitante || '%')
       and (p_responsavel is null or pa.full_name ilike '%' || p_responsavel || '%'
                                  or pg.full_name ilike '%' || p_responsavel || '%')
-      and (p_texto is null or t.title ilike '%' || p_texto || '%'
+      and (p_texto is null or t.ticket_number ilike '%' || p_texto || '%'
+                           or t.title ilike '%' || p_texto || '%'
                            or t.description ilike '%' || p_texto || '%')
       and (p_company_id is null or t.company_id = p_company_id)
       and (p_empresa is null or exists (
@@ -870,7 +872,8 @@ begin
     and (p_solicitante is null or pr2.full_name ilike '%' || p_solicitante || '%')
     and (p_responsavel is null or pe.full_name ilike '%' || p_responsavel || '%'
                                or pat.full_name ilike '%' || p_responsavel || '%')
-    and (p_texto is null or o.title ilike '%' || p_texto || '%'
+    and (p_texto is null or o.service_order_number::text ilike '%' || p_texto || '%'
+                         or o.title ilike '%' || p_texto || '%'
                          or o.description ilike '%' || p_texto || '%');
 
   select coalesce(jsonb_agg(z.row_data), '[]'::jsonb)
@@ -903,7 +906,8 @@ begin
       and (p_solicitante is null or pr2.full_name ilike '%' || p_solicitante || '%')
       and (p_responsavel is null or pe.full_name ilike '%' || p_responsavel || '%'
                                  or pat.full_name ilike '%' || p_responsavel || '%')
-      and (p_texto is null or o.title ilike '%' || p_texto || '%'
+      and (p_texto is null or o.service_order_number::text ilike '%' || p_texto || '%'
+                           or o.title ilike '%' || p_texto || '%'
                            or o.description ilike '%' || p_texto || '%')
     order by o.created_at desc
     limit v_limit

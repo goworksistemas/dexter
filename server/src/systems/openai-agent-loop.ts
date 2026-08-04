@@ -62,9 +62,11 @@ function truncarToolResult(raw: string, max: number): string {
 
 const PROMPT_FINAL_FORCADO =
   "Você atingiu o limite de consultas/ferramentas nesta resposta. " +
-  "Com o que já coletou nas tools acima, escreva AGORA a resposta final completa " +
-  "ao usuário em português — análise, exemplos e detalhes pedidos. " +
-  "NÃO chame mais tools. Se faltar dado, diga o que falta e o que já conseguiu apurar."
+  "Com o que já coletou nas tools acima, escreva AGORA a resposta final COMPLETA " +
+  "e DETALHADA ao usuário em português: fatos com números/campos reais, vínculos, " +
+  "interpretação e recomendação se couber. Use tabelas markdown quando houver dados. " +
+  "NÃO chame mais tools. NÃO invente o que não veio nas tools. " +
+  "Se faltar dado crítico, diga exatamente o que falta e o que já apurou."
 
 export async function runOpenAiAgentLoop(
   opts: OpenAiAgentLoopOptions,

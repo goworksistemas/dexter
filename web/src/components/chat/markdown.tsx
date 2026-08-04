@@ -11,7 +11,7 @@ import {
   useState,
   type ReactNode,
 } from "react"
-import { PanelRightOpen } from "lucide-react"
+import { FileCode2, Loader2, PanelRightOpen } from "lucide-react"
 import ReactMarkdown, {
   defaultUrlTransform,
   type Components,
@@ -79,9 +79,62 @@ function isArtifactLang(lang: string | null): lang is "html" | "htm" | "markdown
   )
 }
 
+/**
+ * Card compacto do artefato no chat (estilo Claude): o código NÃO fica aberto
+ * na conversa — visualizar/editar é no painel (botão `</>`).
+ */
+function ArtifactCard({
+  block,
+  creating,
+  onOpen,
+}: {
+  block: DetectedArtifactBlock
+  creating: boolean
+  onOpen?: (block: DetectedArtifactBlock) => void
+}) {
+  const kindLabel = block.kind === "html" ? "HTML" : "Markdown"
+  return (
+    <div className="my-3">
+      <button
+        type="button"
+        disabled={creating || !onOpen}
+        onClick={() => onOpen?.(block)}
+        className={cn(
+          "flex w-full items-center gap-3 rounded-xl border border-border/70 bg-muted/30 px-3.5 py-3 text-left transition-colors",
+          !creating && onOpen
+            ? "cursor-pointer hover:border-primary/40 hover:bg-primary/5"
+            : "cursor-default",
+        )}
+      >
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-background">
+          {creating ? (
+            <Loader2 className="size-4 animate-spin text-primary" />
+          ) : (
+            <FileCode2 className="size-4 text-primary" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm font-medium text-foreground">
+            {block.title}
+          </span>
+          <span className="block truncate text-xs text-muted-foreground">
+            {creating
+              ? `Criando artefato ${kindLabel}…`
+              : `Artefato ${kindLabel} · clique para abrir`}
+          </span>
+        </span>
+        {!creating && onOpen ? (
+          <PanelRightOpen className="size-4 shrink-0 text-muted-foreground" />
+        ) : null}
+      </button>
+    </div>
+  )
+}
+
 function buildComponents(
   onOpenArtifact?: (block: DetectedArtifactBlock) => void,
   images: string[] = [],
+  streaming = false,
 ): Components {
   return {
     h1: ({ className, ...props }) => (
@@ -254,22 +307,34 @@ function buildComponents(
       const lang = langFromClass(childProps?.className)
       const codeText = extractText(childProps?.children ?? children).replace(/\n$/, "")
       const artifact =
-        onOpenArtifact && isArtifactLang(lang)
+        (onOpenArtifact || streaming) && isArtifactLang(lang)
           ? detectArtifactBlocks(
               `\`\`\`${lang}\n${codeText}\n\`\`\``,
             )[0]
           : null
 
+      // Artefato de verdade vira card compacto (código só no painel, aba </>).
+      // Snippets pequenos continuam como bloco de código normal.
+      if (artifact?.substantial) {
+        return (
+          <ArtifactCard
+            block={artifact}
+            creating={streaming}
+            onOpen={onOpenArtifact}
+          />
+        )
+      }
+
       return (
         <div className="group/code relative my-3">
-          {artifact ? (
+          {artifact && onOpenArtifact ? (
             <div className="mb-1.5 flex items-center justify-between gap-2">
               <span className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
                 {artifact.kind === "html" ? "HTML" : "Markdown"}
               </span>
               <button
                 type="button"
-                onClick={() => onOpenArtifact?.(artifact)}
+                onClick={() => onOpenArtifact(artifact)}
                 className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
               >
                 <PanelRightOpen className="size-3.5" />
@@ -388,7 +453,7 @@ export const Markdown = memo(function Markdown({
     [renderContent],
   )
   const components = useMemo(
-    () => buildComponents(streaming ? undefined : onOpenArtifact, images),
+    () => buildComponents(streaming ? undefined : onOpenArtifact, images, streaming),
     [streaming, onOpenArtifact, images],
   )
   const urlTransform = useMemo(
