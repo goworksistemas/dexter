@@ -11,7 +11,9 @@ import type Anthropic from "@anthropic-ai/sdk"
 
 import { config } from "../config.js"
 import { streamChat, type LlmMessage } from "../llm/router.js"
-import { enabledModels, resolveModel } from "../llm/models.js"
+import { enabledModels } from "../llm/models.js"
+import { resolveModelForUser } from "../services/model-access.js"
+import { getEffectiveKey, isKeyProvider } from "../services/llm-keys.js"
 import { isErroSanitizado } from "../lib/erro-modelo.js"
 import { endSSE, initSSE, writeSSE, writeSSEHeartbeat } from "../lib/sse.js"
 import { DEXTER_SYSTEM_PROMPT } from "../llm/system-prompt.js"
@@ -239,7 +241,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       return
     }
 
-    const { userId, email } = await resolveUser(request)
+    const { userId, email, role } = await resolveUser(request)
 
     // Preflight de acesso: o que este usuário (por email) enxerga em cada
     // sistema. Vazio se não houver email ou nenhum sistema configurado.
@@ -323,8 +325,17 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       kbContext,
     )
 
-    // Modelo escolhido na interface (context.model) — catálogo admin + default.
-    const modelInfo = await resolveModel(body.context?.model)
+    // Modelo escolhido na interface (context.model) — catálogo admin + default,
+    // respeitando os modelos liberados para este usuário (profiles.allowed_models).
+    const modelInfo = await resolveModelForUser(body.context?.model, {
+      userId,
+      role,
+    })
+
+    // Chave efetiva deste request: pessoal do usuário (BYOK) → global → env.
+    const providerApiKey = isKeyProvider(modelInfo.provider)
+      ? await getEffectiveKey(modelInfo.provider, userId)
+      : undefined
 
     const lastAttachments = lastMessage.attachments ?? []
     if (lastAttachments.length > 0) {
@@ -558,12 +569,14 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
                   prompt,
                   references,
                   signal: controller.signal,
+                  apiKey: providerApiKey,
                 })
               : await generateImageOpenAI({
                   model: modelInfo.model,
                   prompt,
                   references,
                   signal: controller.signal,
+                  apiKey: providerApiKey,
                 })
           usedModel = img.model
           const storedUrl = await persistChatImageUrl({
@@ -610,6 +623,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
           connectors,
           userId,
           email: email ?? "",
+          apiKey: providerApiKey,
           signal: controller.signal,
           onTextDelta: (t) => {
             fullText += t
@@ -634,6 +648,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
           connectors,
           userId,
           email: email ?? "",
+          apiKey: providerApiKey,
           signal: controller.signal,
           onTextDelta: (t) => {
             fullText += t
@@ -659,6 +674,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
           systemPrompt,
           messages: llmMessages,
           signal: controller.signal,
+          apiKey: providerApiKey,
         })
         for await (const delta of handle.textDeltas) {
           fullText += delta

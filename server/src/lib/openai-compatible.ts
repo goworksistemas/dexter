@@ -1,11 +1,15 @@
 /**
  * Client OpenAI-compatible (Chat Completions streaming).
  * Usado por OpenAI oficial e Gemini (endpoint OpenAI-compat do Google).
+ * Chave: BYOK do usuário (opts.apiKey) ou global do banco → env (llm-keys).
  */
-import { config } from "../config.js"
 import type { Provider } from "../llm/models.js"
 import { responseMaxTokens } from "../llm/models.js"
+import { getGlobalKey } from "../services/llm-keys.js"
 import type { AnthropicTool } from "../systems/tools.js"
+
+/** Provedores servidos pelo protocolo Chat Completions da OpenAI. */
+export type OcProvider = "openai" | "gemini" | "deepseek" | "xai"
 
 export type OcContentPart =
   | { type: "text"; text: string }
@@ -65,13 +69,15 @@ export interface OcToolCall {
 }
 
 export interface OcStreamOptions {
-  provider: "openai" | "gemini"
+  provider: OcProvider
   model: string
   messages: OcMessage[]
   tools?: AnthropicTool[]
   allowTools?: boolean
   maxTokens?: number
   signal?: AbortSignal
+  /** Chave a usar (BYOK/global). Sem ela, resolve a global (banco → env). */
+  apiKey?: string
 }
 
 export interface OcStreamResult {
@@ -83,25 +89,43 @@ export interface OcStreamResult {
   outputTokens?: number
 }
 
-function endpoint(provider: "openai" | "gemini"): {
+const OC_ENDPOINTS: Record<OcProvider, { url: string; nome: string }> = {
+  openai: {
+    url: "https://api.openai.com/v1/chat/completions",
+    nome: "OpenAI",
+  },
+  gemini: {
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    nome: "Gemini",
+  },
+  deepseek: {
+    url: "https://api.deepseek.com/chat/completions",
+    nome: "DeepSeek",
+  },
+  xai: {
+    url: "https://api.x.ai/v1/chat/completions",
+    nome: "Grok (xAI)",
+  },
+}
+
+async function endpoint(
+  provider: OcProvider,
+  apiKey?: string,
+): Promise<{
   url: string
   headers: Record<string, string>
-} {
-  if (provider === "openai") {
-    if (!config.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ausente")
-    return {
-      url: "https://api.openai.com/v1/chat/completions",
-      headers: {
-        Authorization: `Bearer ${config.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-    }
+}> {
+  const key = apiKey ?? (await getGlobalKey(provider))
+  const { url, nome } = OC_ENDPOINTS[provider]
+  if (!key) {
+    throw new Error(
+      `Chave da ${nome} ausente. Cadastre no painel admin ou nas suas Configurações.`,
+    )
   }
-  if (!config.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY ausente")
   return {
-    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    url,
     headers: {
-      Authorization: `Bearer ${config.GEMINI_API_KEY}`,
+      Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     },
   }
@@ -120,7 +144,7 @@ function toOpenAiTools(tools: AnthropicTool[]) {
 
 /** GPT-5 / o-series rejeitam `max_tokens`; exigem `max_completion_tokens`. */
 function usesMaxCompletionTokens(
-  provider: "openai" | "gemini",
+  provider: OcProvider,
   model: string,
 ): boolean {
   if (provider !== "openai") return false
@@ -130,7 +154,7 @@ function usesMaxCompletionTokens(
 
 function applyTokenLimit(
   body: Record<string, unknown>,
-  provider: "openai" | "gemini",
+  provider: OcProvider,
   model: string,
   maxTokens: number,
 ): void {
@@ -147,7 +171,7 @@ function applyTokenLimit(
  */
 function applyReasoningForTools(
   body: Record<string, unknown>,
-  provider: "openai" | "gemini",
+  provider: OcProvider,
   model: string,
   hasTools: boolean,
 ): void {
@@ -166,7 +190,7 @@ export async function streamOpenAiCompatible(
   opts: OcStreamOptions,
   onTextDelta: (text: string) => void,
 ): Promise<OcStreamResult> {
-  const { url, headers } = endpoint(opts.provider)
+  const { url, headers } = await endpoint(opts.provider, opts.apiKey)
   const maxTokens = opts.maxTokens ?? responseMaxTokens(opts.model)
   const body: Record<string, unknown> = {
     model: opts.model,
@@ -280,10 +304,8 @@ export async function streamOpenAiCompatible(
   }
 }
 
-export function isOpenAiCompatibleProvider(
-  p: Provider,
-): p is "openai" | "gemini" {
-  return p === "openai" || p === "gemini"
+export function isOpenAiCompatibleProvider(p: Provider): p is OcProvider {
+  return p === "openai" || p === "gemini" || p === "deepseek" || p === "xai"
 }
 
 function formatProviderHttpError(

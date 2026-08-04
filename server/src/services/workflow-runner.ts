@@ -18,7 +18,9 @@ import { isErroSanitizado } from "../lib/erro-modelo.js"
 import { isOpenAiCompatibleProvider } from "../lib/openai-compatible.js"
 import { formatLocalDayMonth } from "../lib/schedule.js"
 import { supabase } from "../lib/supabase.js"
-import { resolveModel, type Provider } from "../llm/models.js"
+import type { Provider } from "../llm/models.js"
+import { getEffectiveKey, isKeyProvider } from "./llm-keys.js"
+import { resolveModelForUser } from "./model-access.js"
 import { streamChat } from "../llm/router.js"
 import { DEXTER_SYSTEM_PROMPT } from "../llm/system-prompt.js"
 import { runAgentLoop, type ToolCallRecord } from "../systems/agent-loop.js"
@@ -139,6 +141,7 @@ async function rodarLoop(params: {
   model: string
   systemPrompt: string
   signal: AbortSignal
+  apiKey?: string
 }): Promise<ResultadoLoop> {
   let texto = ""
   const toolCalls: ToolCallRecord[] = []
@@ -156,6 +159,7 @@ async function rodarLoop(params: {
     userId: params.workflow.user_id,
     email: params.email,
     signal: params.signal,
+    apiKey: params.apiKey,
     onTextDelta,
     onToolCall,
     // Sem UI para acompanhar — progresso é descartado.
@@ -262,7 +266,9 @@ export async function runWorkflow(
     const [access, connectors, modelInfo] = await Promise.all([
       email ? resolveAccess(email) : Promise.resolve([] as SystemAccess[]),
       resolveConnectorRuntime(workflow.user_id),
-      resolveModel(workflow.model_id ?? undefined),
+      resolveModelForUser(workflow.model_id ?? undefined, {
+        userId: workflow.user_id,
+      }),
     ])
 
     const agora = new Date()
@@ -292,6 +298,9 @@ export async function runWorkflow(
       model: modelInfo.model,
       systemPrompt: systemPromptDoWorkflow(workflow, access),
       signal: controller.signal,
+      apiKey: isKeyProvider(modelInfo.provider)
+        ? await getEffectiveKey(modelInfo.provider, workflow.user_id)
+        : undefined,
     })
 
     const conteudo =

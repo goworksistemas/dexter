@@ -5,7 +5,13 @@
 import { supabase } from "../lib/supabase.js"
 import { NotFoundError } from "./errors.js"
 
-export type ModelProvider = "anthropic" | "openai" | "gemini" | "ollama"
+export type ModelProvider =
+  | "anthropic"
+  | "openai"
+  | "gemini"
+  | "deepseek"
+  | "xai"
+  | "ollama"
 
 export interface ModelOverride {
   id: string

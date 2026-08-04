@@ -5,14 +5,13 @@
  */
 import type { FastifyInstance } from "fastify"
 
-import {
-  defaultModelId,
-  listModelsWithCredentialFlag,
-  probeModels,
-  providerStatus,
-} from "../llm/models.js"
+import { probeModels, providerStatus } from "../llm/models.js"
 import { isStaffRole, loadActorProfile } from "../services/admin-store.js"
 import { resolveUser } from "../services/auth.js"
+import {
+  defaultModelIdForUser,
+  enabledModelsForUser,
+} from "../services/model-access.js"
 
 export default async function modelsRoutes(
   app: FastifyInstance,
@@ -35,13 +34,14 @@ export default async function modelsRoutes(
         }
       }
 
-      const models = probe
-        ? await probeModels(true)
-        : await listModelsWithCredentialFlag()
+      // Rediscovery (staff) atualiza o cache; a lista final é sempre a do
+      // usuário — só os modelos liberados para ele (profiles.allowed_models).
+      if (probe) await probeModels(true)
+      const models = await enabledModelsForUser(user)
 
       return {
-        default: await defaultModelId(),
-        providers: providerStatus(),
+        default: await defaultModelIdForUser(user),
+        providers: await providerStatus(),
         models: models.map(
           ({
             id,

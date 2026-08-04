@@ -1,8 +1,9 @@
 /**
  * Geração de imagens — OpenAI Images API e Gemini (Nano Banana / *-image).
  * Aceita imagens de referência (edição / image-to-image) quando o modelo suporta.
+ * Chave: BYOK do usuário (opts.apiKey) ou global do banco → env (llm-keys).
  */
-import { config } from "../config.js"
+import { getGlobalKey } from "../services/llm-keys.js"
 
 export interface GenerateImageResult {
   model: string
@@ -32,8 +33,10 @@ export async function generateImageOpenAI(opts: {
   size?: "1024x1024" | "1024x1536" | "1536x1024" | "auto"
   references?: ImageReference[]
   signal?: AbortSignal
+  apiKey?: string
 }): Promise<GenerateImageResult> {
-  if (!config.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ausente")
+  const apiKey = opts.apiKey ?? (await getGlobalKey("openai"))
+  if (!apiKey) throw new Error("Chave da OpenAI ausente. Cadastre no painel admin.")
 
   const model = opts.model
   const refs = (opts.references ?? []).filter((r) =>
@@ -46,6 +49,7 @@ export async function generateImageOpenAI(opts: {
       size: opts.size,
       references: refs,
       signal: opts.signal,
+      apiKey,
     })
   }
 
@@ -67,7 +71,7 @@ export async function generateImageOpenAI(opts: {
   const res = await fetch("https://api.openai.com/v1/images/generations", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${config.OPENAI_API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
     signal: opts.signal,
@@ -91,6 +95,7 @@ async function editImageOpenAI(opts: {
   size?: "1024x1024" | "1024x1536" | "1536x1024" | "auto"
   references: ImageReference[]
   signal?: AbortSignal
+  apiKey: string
 }): Promise<GenerateImageResult> {
   const model = opts.model
   if (!/gpt-image|dall-e-2/i.test(model)) {
@@ -130,7 +135,7 @@ async function editImageOpenAI(opts: {
   const res = await fetch("https://api.openai.com/v1/images/edits", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${config.OPENAI_API_KEY}`,
+      Authorization: `Bearer ${opts.apiKey}`,
     },
     signal: opts.signal,
     body: form,
@@ -183,11 +188,13 @@ export async function generateImageGemini(opts: {
   prompt: string
   references?: ImageReference[]
   signal?: AbortSignal
+  apiKey?: string
 }): Promise<GenerateImageResult> {
-  if (!config.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY ausente")
+  const apiKey = opts.apiKey ?? (await getGlobalKey("gemini"))
+  if (!apiKey) throw new Error("Chave do Gemini ausente. Cadastre no painel admin.")
 
   const model = opts.model.replace(/^models\//, "")
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(config.GEMINI_API_KEY)}`
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`
 
   const parts: Array<Record<string, unknown>> = []
   for (const ref of opts.references ?? []) {

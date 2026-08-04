@@ -10,6 +10,8 @@ export interface AdminUserRow {
   avatar_url: string | null
   role: DexterRole
   disabled_at: string | null
+  /** Modelos liberados (ids provider:modelo). null = todos os habilitados. */
+  allowed_models: string[] | null
   created_at: string
   updated_at: string
   last_sign_in_at: string | null
@@ -194,7 +196,12 @@ export async function fetchAdminUserDetail(
 
 export async function patchAdminUser(
   id: string,
-  patch: { role?: DexterRole; disabled?: boolean },
+  patch: {
+    role?: DexterRole
+    disabled?: boolean
+    /** null = liberar todos os modelos; array = restringir a estes ids. */
+    allowed_models?: string[] | null
+  },
 ): Promise<AdminUserRow> {
   const res = await fetch(`${BASE}/users/${id}`, {
     method: "PATCH",
@@ -214,6 +221,8 @@ export type AdminModelProvider =
   | "anthropic"
   | "openai"
   | "gemini"
+  | "deepseek"
+  | "xai"
   | "ollama"
 
 export interface AdminCatalogModel {
@@ -299,6 +308,135 @@ export async function bulkPatchAdminModels(
     )
   }
   return res.json()
+}
+
+// --- Chaves de API globais dos provedores (banco, cifradas) -----------------
+
+export type ProviderKeyProvider =
+  | "anthropic"
+  | "openai"
+  | "gemini"
+  | "deepseek"
+  | "xai"
+
+export interface AdminProviderKey {
+  provider: ProviderKeyProvider
+  last4: string
+  updated_at: string
+}
+
+export interface AdminProviderKeysResponse {
+  /** false = USER_API_KEYS_SECRET ausente no servidor (gestão desabilitada). */
+  enabled: boolean
+  keys: AdminProviderKey[]
+  /** Presença de fallback por variável de ambiente (legado Infisical). */
+  env: Record<ProviderKeyProvider, boolean>
+}
+
+export async function fetchAdminProviderKeys(): Promise<AdminProviderKeysResponse> {
+  const res = await fetch(`${BASE}/provider-keys`, {
+    headers: await authHeaders(),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(res, `GET /api/admin/provider-keys → ${res.status}`),
+    )
+  }
+  return res.json()
+}
+
+export async function putAdminProviderKey(
+  provider: ProviderKeyProvider,
+  key: string,
+): Promise<AdminProviderKey> {
+  const res = await fetch(`${BASE}/provider-keys/${provider}`, {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify({ key }),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(res, `PUT /api/admin/provider-keys/${provider} → ${res.status}`),
+    )
+  }
+  const body = (await res.json()) as { key: AdminProviderKey }
+  return body.key
+}
+
+export async function deleteAdminProviderKey(
+  provider: ProviderKeyProvider,
+): Promise<void> {
+  const res = await fetch(`${BASE}/provider-keys/${provider}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(
+        res,
+        `DELETE /api/admin/provider-keys/${provider} → ${res.status}`,
+      ),
+    )
+  }
+}
+
+// --- Chaves dedicadas por usuário (atribuídas pelo admin) -------------------
+// Mesma tabela do BYOK: a chave dedicada é a que o usuário usaria se
+// cadastrasse a própria nas Configurações.
+
+export async function fetchAdminUserKeys(userId: string): Promise<{
+  enabled: boolean
+  keys: AdminProviderKey[]
+}> {
+  const res = await fetch(`${BASE}/users/${userId}/keys`, {
+    headers: await authHeaders(),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(res, `GET /api/admin/users/${userId}/keys → ${res.status}`),
+    )
+  }
+  return res.json()
+}
+
+export async function putAdminUserKey(
+  userId: string,
+  provider: ProviderKeyProvider,
+  key: string,
+): Promise<AdminProviderKey> {
+  const res = await fetch(`${BASE}/users/${userId}/keys/${provider}`, {
+    method: "PUT",
+    headers: await authHeaders(),
+    body: JSON.stringify({ key }),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(
+        res,
+        `PUT /api/admin/users/${userId}/keys/${provider} → ${res.status}`,
+      ),
+    )
+  }
+  const body = (await res.json()) as { key: AdminProviderKey }
+  return body.key
+}
+
+export async function deleteAdminUserKey(
+  userId: string,
+  provider: ProviderKeyProvider,
+): Promise<void> {
+  const res = await fetch(`${BASE}/users/${userId}/keys/${provider}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(
+        res,
+        `DELETE /api/admin/users/${userId}/keys/${provider} → ${res.status}`,
+      ),
+    )
+  }
 }
 
 export type KbCategory =

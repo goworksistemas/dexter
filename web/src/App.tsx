@@ -37,6 +37,9 @@ const AuthCallbackPage = React.lazy(() =>
 const AdminPage = React.lazy(() =>
   import("@/pages/admin").then((m) => ({ default: m.AdminPage })),
 )
+const AdminKeysPage = React.lazy(() =>
+  import("@/pages/admin/keys").then((m) => ({ default: m.AdminKeysPage })),
+)
 const SettingsPage = React.lazy(() =>
   import("@/pages/settings").then((m) => ({ default: m.SettingsPage })),
 )
@@ -197,6 +200,7 @@ function App() {
             <Route path="workflows" element={<WorkflowsPage />} />
             <Route path="artifacts" element={<ArtifactsPage />} />
             <Route path="admin" element={<AdminPage />} />
+            <Route path="admin/chaves" element={<AdminKeysPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>
         </Route>

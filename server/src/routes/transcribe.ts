@@ -38,7 +38,7 @@ export default async function transcribeRoutes(
   app.get("/api/transcribe/status", async (request) => {
     await resolveUser(request)
     return {
-      configured: sttConfigured(),
+      configured: await sttConfigured(),
       model: (await import("../config.js")).config.STT_MODEL,
     }
   })

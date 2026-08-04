@@ -6,22 +6,33 @@
  *     (AsyncIterable<MessageStreamEvent>) com `.finalMessage()` (model + usage).
  *   - Deltas de texto: `content_block_delta` com `delta.type === "text_delta"`.
  *
- * O client é criado sob demanda (lazy) — assim, em LLM_PROVIDER=ollama o
- * backend sobe sem exigir ANTHROPIC_API_KEY.
+ * O client é criado sob demanda por chave — a chave pode ser a pessoal do
+ * usuário (BYOK), a global do admin (banco) ou o env legado (services/llm-keys).
  */
 import Anthropic from "@anthropic-ai/sdk"
 
 import { config } from "../config.js"
 import { responseMaxTokens } from "../llm/models.js"
+import { getGlobalKey } from "../services/llm-keys.js"
 
-let client: Anthropic | null = null
+const clients = new Map<string, Anthropic>()
 
-function getClient(): Anthropic {
+/** Client para a chave dada (BYOK) ou para a chave global (banco → env). */
+export async function getAnthropicClient(apiKey?: string): Promise<Anthropic> {
+  const key = apiKey ?? (await getGlobalKey("anthropic"))
+  if (!key) {
+    throw new Error(
+      "Chave da Anthropic ausente. Cadastre no painel admin (aba Modelos) ou nas suas Configurações.",
+    )
+  }
+  let client = clients.get(key)
   if (!client) {
-    if (!config.ANTHROPIC_API_KEY) {
-      throw new Error("ANTHROPIC_API_KEY ausente (LLM_PROVIDER=anthropic)")
+    client = new Anthropic({ apiKey: key })
+    clients.set(key, client)
+    if (clients.size > 200) {
+      const oldest = clients.keys().next().value
+      if (oldest) clients.delete(oldest)
     }
-    client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY })
   }
   return client
 }
@@ -32,6 +43,8 @@ export interface AnthropicStreamOptions {
   messages: Anthropic.MessageParam[]
   maxTokens?: number
   signal?: AbortSignal
+  /** Chave a usar (BYOK/global). Sem ela, resolve a global. */
+  apiKey?: string
 }
 
 export interface AnthropicStreamHandle {
@@ -42,17 +55,21 @@ export interface AnthropicStreamHandle {
 /** Inicia o streaming de uma resposta na Anthropic. */
 export function streamChatAnthropic(opts: AnthropicStreamOptions): AnthropicStreamHandle {
   const model = opts.model ?? config.ANTHROPIC_MODEL // fallback legado; preferir catálogo admin
-  const stream = getClient().messages.stream(
-    {
-      model,
-      max_tokens: opts.maxTokens ?? responseMaxTokens(model),
-      system: opts.systemPrompt,
-      messages: opts.messages,
-    },
-    { signal: opts.signal }
+
+  const streamPromise = getAnthropicClient(opts.apiKey).then((client) =>
+    client.messages.stream(
+      {
+        model,
+        max_tokens: opts.maxTokens ?? responseMaxTokens(model),
+        system: opts.systemPrompt,
+        messages: opts.messages,
+      },
+      { signal: opts.signal },
+    ),
   )
 
   async function* textDeltas(): AsyncGenerator<string> {
+    const stream = await streamPromise
     for await (const event of stream) {
       if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
         yield event.delta.text
@@ -62,6 +79,6 @@ export function streamChatAnthropic(opts: AnthropicStreamOptions): AnthropicStre
 
   return {
     textDeltas: textDeltas(),
-    finalMessage: () => stream.finalMessage(),
+    finalMessage: async () => (await streamPromise).finalMessage(),
   }
 }

@@ -1,9 +1,11 @@
 /**
  * Catálogo DINÂMICO de modelos — descoberto nas APIs dos providers.
- * Infisical só guarda chaves. Admin só guarda overrides (hide/default/rótulo).
+ * Chaves vêm do banco (painel admin) com env como fallback (services/llm-keys).
+ * Admin só guarda overrides (hide/default/rótulo).
  * Descrição, tokens e capabilities: só o que a API informar (senão vazio/null).
  */
 import { config } from "../config.js"
+import { getGlobalKey, type KeyProvider } from "../services/llm-keys.js"
 import {
   listModelOverrides,
   type ModelOverride,
@@ -122,11 +124,10 @@ interface CatalogCache {
 
 let catalogCache: CatalogCache | null = null
 
-export function providerCredentialPresent(p: Provider): boolean {
-  if (p === "anthropic") return Boolean(config.ANTHROPIC_API_KEY)
-  if (p === "openai") return Boolean(config.OPENAI_API_KEY)
-  if (p === "gemini") return Boolean(config.GEMINI_API_KEY)
-  return Boolean(config.OLLAMA_BASE_URL)
+/** Chave global efetiva (banco → env); ollama depende só da base URL. */
+export async function providerCredentialPresent(p: Provider): Promise<boolean> {
+  if (p === "ollama") return Boolean(config.OLLAMA_BASE_URL)
+  return Boolean(await getGlobalKey(p as KeyProvider))
 }
 
 export function invalidateModelProbeCache(): void {
@@ -257,15 +258,14 @@ function isGeminiCatalogGhost(name: string, description?: string): boolean {
   return /^gemini-2\.0-flash/.test(id)
 }
 
-async function discoverAnthropic(): Promise<Discovered[]> {
+async function discoverAnthropic(apiKey: string): Promise<Discovered[]> {
   const started = Date.now()
-  if (!config.ANTHROPIC_API_KEY) return []
   try {
     const res = await withTimeout(
       (signal) =>
         fetch("https://api.anthropic.com/v1/models?limit=100", {
           headers: {
-            "x-api-key": config.ANTHROPIC_API_KEY,
+            "x-api-key": apiKey,
             "anthropic-version": "2023-06-01",
           },
           signal,
@@ -318,14 +318,13 @@ async function discoverAnthropic(): Promise<Discovered[]> {
   }
 }
 
-async function discoverOpenAI(): Promise<Discovered[]> {
+async function discoverOpenAI(apiKey: string): Promise<Discovered[]> {
   const started = Date.now()
-  if (!config.OPENAI_API_KEY) return []
   try {
     const res = await withTimeout(
       (signal) =>
         fetch("https://api.openai.com/v1/models", {
-          headers: { Authorization: `Bearer ${config.OPENAI_API_KEY}` },
+          headers: { Authorization: `Bearer ${apiKey}` },
           signal,
         }).then(async (r) => {
           if (!r.ok) {
@@ -371,11 +370,10 @@ async function discoverOpenAI(): Promise<Discovered[]> {
   }
 }
 
-async function discoverGemini(): Promise<Discovered[]> {
+async function discoverGemini(apiKey: string): Promise<Discovered[]> {
   const started = Date.now()
-  if (!config.GEMINI_API_KEY) return []
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=100&key=${encodeURIComponent(config.GEMINI_API_KEY)}`
+    const url = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=100&key=${encodeURIComponent(apiKey)}`
     const res = await withTimeout(
       (signal) =>
         fetch(url, { signal }).then(async (r) => {
@@ -427,6 +425,65 @@ async function discoverGemini(): Promise<Discovered[]> {
     return out.sort((a, b) => a.label.localeCompare(b.label))
   } catch (err) {
     return [providerErrorRow("gemini", "Gemini", err, started)]
+  }
+}
+
+/** DeepSeek e xAI: GET /models no formato OpenAI (id + created). */
+async function discoverOpenAiStyle(
+  provider: "deepseek" | "xai",
+  label: string,
+  url: string,
+  apiKey: string,
+): Promise<Discovered[]> {
+  const started = Date.now()
+  try {
+    const res = await withTimeout(
+      (signal) =>
+        fetch(url, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+          signal,
+        }).then(async (r) => {
+          if (!r.ok) {
+            const body = await r.text().catch(() => "")
+            throw new Error(
+              `HTTP ${r.status}${body ? `: ${body.slice(0, 160)}` : ""}`,
+            )
+          }
+          return r.json() as Promise<{
+            data?: Array<{ id?: string; created?: number }>
+          }>
+        }),
+      DISCOVER_TIMEOUT_MS,
+      provider,
+    )
+    const latencyMs = Date.now() - started
+    return (res.data ?? [])
+      .filter((m): m is { id: string; created?: number } =>
+        typeof m.id === "string" && m.id.length > 0,
+      )
+      .sort((a, b) => (b.created ?? 0) - (a.created ?? 0))
+      .map((row) => {
+        // Grok: modelos *-vision e grok-4+ analisam imagem (a API não informa
+        // caps — marcação mínima pelo id, sem inventar o resto).
+        const vision =
+          provider === "xai" && /vision|grok-[4-9]/i.test(row.id)
+        const capabilities = { vision, files: false, imageGeneration: false }
+        return {
+          provider: provider as Provider,
+          model: row.id,
+          label: humanizeModelId(row.id),
+          description: apiDescriptionOnly(null),
+          traits: capabilityTraits(capabilities),
+          capabilities,
+          maxOutputTokens: null,
+          inputTokenLimit: null,
+          releasedAt: toIsoFromUnix(row.created),
+          latencyMs,
+          ok: true,
+        }
+      })
+  } catch (err) {
+    return [providerErrorRow(provider, label, err, started)]
   }
 }
 
@@ -622,23 +679,48 @@ async function buildCatalog(force = false): Promise<ProbedModel[]> {
 }
 
 async function discoverCatalog(): Promise<ProbedModel[]> {
-  const [anthropic, openai, gemini, ollama, overrides] = await Promise.all([
-    providerCredentialPresent("anthropic")
-      ? discoverAnthropic()
-      : Promise.resolve([] as Discovered[]),
-    providerCredentialPresent("openai")
-      ? discoverOpenAI()
-      : Promise.resolve([] as Discovered[]),
-    providerCredentialPresent("gemini")
-      ? discoverGemini()
-      : Promise.resolve([] as Discovered[]),
-    providerCredentialPresent("ollama")
-      ? discoverOllama()
-      : Promise.resolve([] as Discovered[]),
-    listModelOverrides().catch(() => [] as ModelOverride[]),
-  ])
+  const [anthropicKey, openaiKey, geminiKey, deepseekKey, xaiKey] =
+    await Promise.all([
+      getGlobalKey("anthropic"),
+      getGlobalKey("openai"),
+      getGlobalKey("gemini"),
+      getGlobalKey("deepseek"),
+      getGlobalKey("xai"),
+    ])
+  const nada = Promise.resolve([] as Discovered[])
+  const [anthropic, openai, gemini, deepseek, xai, ollama, overrides] =
+    await Promise.all([
+      anthropicKey ? discoverAnthropic(anthropicKey) : nada,
+      openaiKey ? discoverOpenAI(openaiKey) : nada,
+      geminiKey ? discoverGemini(geminiKey) : nada,
+      deepseekKey
+        ? discoverOpenAiStyle(
+            "deepseek",
+            "DeepSeek",
+            "https://api.deepseek.com/models",
+            deepseekKey,
+          )
+        : nada,
+      xaiKey
+        ? discoverOpenAiStyle(
+            "xai",
+            "Grok (xAI)",
+            "https://api.x.ai/v1/models",
+            xaiKey,
+          )
+        : nada,
+      config.OLLAMA_BASE_URL ? discoverOllama() : nada,
+      listModelOverrides().catch(() => [] as ModelOverride[]),
+    ])
 
-  const discovered = [...anthropic, ...openai, ...gemini, ...ollama]
+  const discovered = [
+    ...anthropic,
+    ...openai,
+    ...gemini,
+    ...deepseek,
+    ...xai,
+    ...ollama,
+  ]
   const models = applyOverrides(discovered, overrides)
   catalogCache = { at: Date.now(), models }
   return models
@@ -693,7 +775,7 @@ export async function resolveModel(id?: string): Promise<ModelInfo> {
   if (def) return def
   if (enabled[0]) return enabled[0]
   throw new Error(
-    "Nenhum modelo disponível. Cadastre OPENAI_API_KEY, GEMINI_API_KEY ou ANTHROPIC_API_KEY no Infisical e reinicie o AgentCore.",
+    "Nenhum modelo disponível. Cadastre as chaves dos provedores no painel admin (aba Modelos) ou verifique o servidor Ollama.",
   )
 }
 
@@ -712,11 +794,22 @@ export async function listAllDiscoveredModels(
   return buildCatalog(force)
 }
 
-export function providerStatus(): Record<Provider, { credential: boolean }> {
+export async function providerStatus(): Promise<
+  Record<Provider, { credential: boolean }>
+> {
+  const [anthropic, openai, gemini, deepseek, xai] = await Promise.all([
+    providerCredentialPresent("anthropic"),
+    providerCredentialPresent("openai"),
+    providerCredentialPresent("gemini"),
+    providerCredentialPresent("deepseek"),
+    providerCredentialPresent("xai"),
+  ])
   return {
-    anthropic: { credential: providerCredentialPresent("anthropic") },
-    openai: { credential: providerCredentialPresent("openai") },
-    gemini: { credential: providerCredentialPresent("gemini") },
-    ollama: { credential: providerCredentialPresent("ollama") },
+    anthropic: { credential: anthropic },
+    openai: { credential: openai },
+    gemini: { credential: gemini },
+    deepseek: { credential: deepseek },
+    xai: { credential: xai },
+    ollama: { credential: Boolean(config.OLLAMA_BASE_URL) },
   }
 }

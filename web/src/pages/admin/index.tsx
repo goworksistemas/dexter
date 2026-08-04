@@ -3,6 +3,7 @@ import { Link, Navigate } from "react-router-dom"
 import { toast } from "sonner"
 import {
   Activity,
+  KeyRound,
   Loader2,
   MessageSquare,
   Search,
@@ -346,7 +347,11 @@ export function AdminPage() {
 
   const applyPatch = async (
     id: string,
-    patch: { role?: DexterRole; disabled?: boolean },
+    patch: {
+      role?: DexterRole
+      disabled?: boolean
+      allowed_models?: string[] | null
+    },
   ) => {
     setBusyId(id)
     try {
@@ -398,25 +403,33 @@ export function AdminPage() {
         title="Administração"
         description="Analytics de uso, tokens por modelo, usuários e conversas."
         actions={
-          adminTab === "analytics" ? (
-            <div className="flex items-center gap-1 rounded-lg border border-border p-0.5">
-              {PERIODS.map((p) => (
-                <button
-                  key={p.days}
-                  type="button"
-                  onClick={() => setDays(p.days)}
-                  className={cn(
-                    "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                    days === p.days
-                      ? "bg-foreground text-background"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          ) : null
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" className="gap-1.5" asChild>
+              <Link to="/admin/chaves">
+                <KeyRound className="size-3.5" />
+                Chaves & acessos
+              </Link>
+            </Button>
+            {adminTab === "analytics" ? (
+              <div className="flex items-center gap-1 rounded-lg border border-border p-0.5">
+                {PERIODS.map((p) => (
+                  <button
+                    key={p.days}
+                    type="button"
+                    onClick={() => setDays(p.days)}
+                    className={cn(
+                      "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                      days === p.days
+                        ? "bg-foreground text-background"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         }
       />
 
@@ -933,6 +946,21 @@ export function AdminPage() {
                           {detail.profile.disabled_at
                             ? "Reativar usuário"
                             : "Desativar usuário"}
+                        </Button>
+
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="gap-1.5"
+                          asChild
+                        >
+                          <Link
+                            to={`/admin/chaves?user=${detail.profile.id}`}
+                            onClick={() => setSelectedId(null)}
+                          >
+                            <KeyRound className="size-3.5" />
+                            Modelos liberados e chaves dedicadas
+                          </Link>
                         </Button>
                       </>
                     )}

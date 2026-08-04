@@ -2,7 +2,13 @@
  * Tipos do catálogo de modelos de IA disponíveis (ver `GET /api/models`).
  */
 
-export type ModelProvider = "anthropic" | "openai" | "gemini" | "ollama"
+export type ModelProvider =
+  | "anthropic"
+  | "openai"
+  | "gemini"
+  | "deepseek"
+  | "xai"
+  | "ollama"
 
 export interface ModelCapabilities {
   vision: boolean

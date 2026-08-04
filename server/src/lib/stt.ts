@@ -4,6 +4,7 @@
  * ou server dedicado (Ollama, Faster-Whisper proxy, etc.).
  */
 import { config } from "../config.js"
+import { getGlobalKey } from "../services/llm-keys.js"
 
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024
 /** Provider pendurado não pode prender o request (e o Buffer) para sempre. */
@@ -49,16 +50,16 @@ function sttBaseUrl(): string {
   return raw || "https://api.openai.com"
 }
 
-function sttApiKey(): string | undefined {
+async function sttApiKey(): Promise<string | undefined> {
   if (config.STT_API_KEY?.trim()) return config.STT_API_KEY.trim()
   const base = sttBaseUrl()
-  if (base.includes("openai.com")) return config.OPENAI_API_KEY
+  if (base.includes("openai.com")) return getGlobalKey("openai")
   // Server dedicado (ex. ollama.gowork.com.br) — mesma chave de acesso do Ollama.
-  return process.env.OLLAMA_API_KEY || config.OPENAI_API_KEY
+  return process.env.OLLAMA_API_KEY || (await getGlobalKey("openai"))
 }
 
-export function sttConfigured(): boolean {
-  return Boolean(sttApiKey() || !sttBaseUrl().includes("openai.com"))
+export async function sttConfigured(): Promise<boolean> {
+  return Boolean((await sttApiKey()) || !sttBaseUrl().includes("openai.com"))
 }
 
 function extensionForMime(mime: string): string {
@@ -120,11 +121,11 @@ export async function transcribeAudio(input: {
     throw new SttError("Áudio maior que 25 MB.", 413)
   }
 
-  const apiKey = sttApiKey()
+  const apiKey = await sttApiKey()
   const base = sttBaseUrl()
   if (!apiKey && base.includes("openai.com")) {
     throw new SttError(
-      "STT não configurado. Cadastre OPENAI_API_KEY ou STT_API_KEY / STT_BASE_URL no Infisical.",
+      "STT não configurado. Cadastre a chave da OpenAI no painel admin ou configure STT_API_KEY / STT_BASE_URL.",
       503,
     )
   }

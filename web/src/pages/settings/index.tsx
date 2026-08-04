@@ -1,17 +1,25 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { Link, useNavigate } from "react-router-dom"
-import { ArrowLeft, LogOut, Monitor, Moon, Sun } from "lucide-react"
+import { ArrowLeft, KeyRound, LogOut, Monitor, Moon, Sun, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Separator } from "@/components/ui/separator"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   updatePassword,
   updateProfileName,
   updateProfileTheme,
 } from "@/lib/supabase"
+import {
+  deleteUserKey,
+  fetchUserKeys,
+  saveUserKey,
+  type UserKey,
+  type UserKeyProvider,
+} from "@/lib/user-keys/api"
 import { useAuth } from "@/providers/auth-provider"
 import { useTheme, type Theme } from "@/providers/theme-provider"
 import { cn } from "@/lib/utils"
@@ -30,6 +38,26 @@ const THEMES: { id: Theme; label: string; icon: typeof Sun }[] = [
   { id: "dark", label: "Escuro", icon: Moon },
   { id: "system", label: "Sistema", icon: Monitor },
 ]
+
+/** `of` já vem com a preposição: os nomes têm gêneros diferentes em PT. */
+const KEY_PROVIDERS: {
+  id: UserKeyProvider
+  label: string
+  of: string
+  placeholder: string
+}[] = [
+  { id: "anthropic", label: "Anthropic", of: "da Anthropic", placeholder: "sk-ant-..." },
+  { id: "openai", label: "OpenAI", of: "da OpenAI", placeholder: "sk-..." },
+  { id: "gemini", label: "Google Gemini", of: "do Google Gemini", placeholder: "AIza..." },
+  { id: "deepseek", label: "DeepSeek", of: "da DeepSeek", placeholder: "sk-..." },
+  { id: "xai", label: "Grok (xAI)", of: "do Grok (xAI)", placeholder: "xai-..." },
+]
+
+function formatDayMonth(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return "—"
+  return date.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
+}
 
 export function SettingsPage() {
   const { user, signOut, refreshProfile } = useAuth()
@@ -126,7 +154,7 @@ export function SettingsPage() {
           <div>
             <h1 className="text-lg font-semibold text-foreground">Configurações</h1>
             <p className="text-sm text-muted-foreground">
-              Conta, aparência e segurança.
+              Conta, aparência, segurança e chaves de API.
             </p>
           </div>
         </div>
@@ -251,6 +279,10 @@ export function SettingsPage() {
 
         <Separator />
 
+        <ApiKeysSection />
+
+        <Separator />
+
         <section className="space-y-3">
           <h2 className="text-sm font-medium text-foreground">Sessão</h2>
           <Button
@@ -264,5 +296,156 @@ export function SettingsPage() {
         </section>
       </div>
     </div>
+  )
+}
+
+function ApiKeysSection() {
+  const [loading, setLoading] = useState(true)
+  const [enabled, setEnabled] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [keys, setKeys] = useState<UserKey[]>([])
+  /** Rascunho digitado por provedor (limpo após salvar). */
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  /** Provedor com operação em andamento (salvar/remover). */
+  const [busy, setBusy] = useState<UserKeyProvider | null>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchUserKeys(controller.signal)
+      .then((res) => {
+        setEnabled(res.enabled)
+        setKeys(res.keys)
+        setLoadError(null)
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return
+        setLoadError(err instanceof Error ? err.message : "Falha ao carregar chaves.")
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false)
+      })
+    return () => controller.abort()
+  }, [])
+
+  const onSave = async (provider: UserKeyProvider) => {
+    const value = (drafts[provider] ?? "").trim()
+    if (value.length < 8) {
+      toast.error("Cole a chave completa antes de salvar.")
+      return
+    }
+    setBusy(provider)
+    try {
+      const saved = await saveUserKey(provider, value)
+      setKeys((prev) => [...prev.filter((k) => k.provider !== provider), saved])
+      setDrafts((prev) => ({ ...prev, [provider]: "" }))
+      toast.success("Chave salva. Suas conversas passam a usar a sua chave.")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao salvar chave.")
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const onDelete = async (provider: UserKeyProvider) => {
+    setBusy(provider)
+    try {
+      await deleteUserKey(provider)
+      setKeys((prev) => prev.filter((k) => k.provider !== provider))
+      toast.success("Chave removida. Volta a valer a chave da empresa.")
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Falha ao remover chave.")
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2">
+        <KeyRound className="size-4 text-muted-foreground" />
+        <h2 className="text-sm font-medium text-foreground">Chaves de API pessoais</h2>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Opcional: use suas próprias chaves nos modelos pagos. Quando cadastrada,
+        a sua chave tem prioridade sobre a da empresa. Ela é guardada
+        criptografada e nunca é exibida de volta — só os 4 últimos caracteres.
+      </p>
+
+      {loading ? (
+        <div className="space-y-2">
+          {KEY_PROVIDERS.map((p) => (
+            <Skeleton key={p.id} className="h-14 w-full rounded-lg" />
+          ))}
+        </div>
+      ) : loadError ? (
+        <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+          {loadError}
+        </p>
+      ) : !enabled ? (
+        <p className="rounded-lg border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+          A gestão de chaves está desabilitada no servidor. Fale com um
+          administrador.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {KEY_PROVIDERS.map((p) => {
+            const saved = keys.find((k) => k.provider === p.id)
+            const draft = drafts[p.id] ?? ""
+            const isBusy = busy === p.id
+            return (
+              <div key={p.id} className="space-y-1.5 rounded-lg border p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium">{p.label}</span>
+                  {saved ? (
+                    <span className="text-xs text-muted-foreground">
+                      •••• {saved.last4} · atualizada em {formatDayMonth(saved.updated_at)}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      usando a chave da empresa
+                    </span>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    type="password"
+                    autoComplete="off"
+                    placeholder={
+                      saved ? `Substituir chave ${p.of}...` : p.placeholder
+                    }
+                    value={draft}
+                    onChange={(e) =>
+                      setDrafts((prev) => ({ ...prev, [p.id]: e.target.value }))
+                    }
+                    disabled={isBusy}
+                    className="font-mono text-xs"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={isBusy || draft.trim().length === 0}
+                    onClick={() => void onSave(p.id)}
+                  >
+                    {isBusy ? "..." : "Salvar"}
+                  </Button>
+                  {saved ? (
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="outline"
+                      aria-label={`Remover chave ${p.of}`}
+                      disabled={isBusy}
+                      onClick={() => void onDelete(p.id)}
+                    >
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </section>
   )
 }

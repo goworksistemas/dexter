@@ -32,6 +32,8 @@ export interface LlmStreamOptions {
   systemPrompt: string
   messages: LlmMessage[]
   signal?: AbortSignal
+  /** Chave do provedor (BYOK/global). Sem ela, resolve a global. */
+  apiKey?: string
 }
 
 /** Inicia o streaming de chat no provider/modelo escolhidos (sem tools). */
@@ -75,6 +77,7 @@ export function streamChat(opts: LlmStreamOptions): LlmStreamHandle {
           ],
           allowTools: false,
           signal: opts.signal,
+          apiKey: opts.apiKey,
         },
         (t) => {
           queue.push(t)
@@ -116,6 +119,7 @@ export function streamChat(opts: LlmStreamOptions): LlmStreamHandle {
     systemPrompt: opts.systemPrompt,
     messages: opts.messages,
     signal: opts.signal,
+    apiKey: opts.apiKey,
   })
   return {
     textDeltas: h.textDeltas,

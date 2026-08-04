@@ -32,6 +32,17 @@ const schema = z.object({
 
   OPENAI_API_KEY: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),
+  DEEPSEEK_API_KEY: z.string().optional(),
+  XAI_API_KEY: z.string().optional(),
+
+  /**
+   * Segredo (>=16 chars) do AES-256-GCM das chaves de API guardadas no banco
+   * (globais do admin + BYOK por usuário). ÚNICO segredo de LLM que precisa
+   * ficar no ambiente — as chaves dos provedores agora vivem no banco e as
+   * variáveis *_API_KEY acima são só fallback legado. Sem ele, a gestão de
+   * chaves pela UI fica desabilitada.
+   */
+  USER_API_KEYS_SECRET: z.string().min(16).optional(),
 
   OLLAMA_BASE_URL: z.string().url().default("https://ollama.gowork.com.br"),
   /** Usado só para o seed ollama-default / api_model efetivo. */

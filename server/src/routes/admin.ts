@@ -29,16 +29,38 @@ import {
   listAllDiscoveredModels,
   providerStatus,
 } from "../llm/models.js"
+import {
+  deleteProviderKey,
+  deleteUserKey,
+  isKeyProvider,
+  keyManagementEnabled,
+  listProviderKeysAdmin,
+  listUserKeys,
+  saveProviderKey,
+  saveUserKey,
+} from "../services/llm-keys.js"
+import { invalidateModelAccessCache } from "../services/model-access.js"
 import { resolveUser } from "../services/auth.js"
+import { NotFoundError } from "../services/errors.js"
 
 const patchSchema = z
   .object({
     role: z.enum(["user", "admin", "master"]).optional(),
     disabled: z.boolean().optional(),
+    /** null = todos os modelos habilitados; array = só estes ids. */
+    allowed_models: z
+      .array(z.string().min(1).max(200))
+      .max(500)
+      .nullable()
+      .optional(),
   })
-  .refine((v) => v.role !== undefined || v.disabled !== undefined, {
-    message: "Informe role e/ou disabled.",
-  })
+  .refine(
+    (v) =>
+      v.role !== undefined ||
+      v.disabled !== undefined ||
+      v.allowed_models !== undefined,
+    { message: "Informe role, disabled e/ou allowed_models." },
+  )
 
 const daysSchema = z.coerce.number().int().min(1).max(365).default(30)
 
@@ -143,6 +165,9 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       await assertStaff(actor)
       const body = patchSchema.parse(req.body)
       const updated = await patchAdminUser(actor, req.params.id, body)
+      if (body.allowed_models !== undefined) {
+        invalidateModelAccessCache(req.params.id)
+      }
       return { user: updated }
     },
   )
@@ -170,10 +195,119 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
         credential_ok: m.credentialOk,
         latency_ms: m.latencyMs ?? null,
       })),
-      providers: providerStatus(),
+      providers: await providerStatus(),
       actorRole: actor.role as DexterRole,
     }
   })
+
+  // --- Chaves de API globais dos provedores (banco, cifradas) ---------------
+
+  app.get("/api/admin/provider-keys", async (req) => {
+    const user = await resolveUser(req)
+    const actor = await loadActorProfile(user.userId, user.email)
+    await assertStaff(actor)
+    const result = await listProviderKeysAdmin()
+    return { ...result, actorRole: actor.role as DexterRole }
+  })
+
+  const providerKeySchema = z.object({
+    key: z.string().trim().min(8, "Chave muito curta.").max(400),
+  })
+
+  app.put<{ Params: { provider: string } }>(
+    "/api/admin/provider-keys/:provider",
+    async (req, reply) => {
+      const user = await resolveUser(req)
+      const actor = await loadActorProfile(user.userId, user.email)
+      await assertStaff(actor)
+      if (!keyManagementEnabled()) {
+        reply.code(503)
+        return {
+          message:
+            "Defina USER_API_KEYS_SECRET no ambiente do AgentCore para gerenciar chaves pelo painel.",
+        }
+      }
+      const provider = req.params.provider
+      if (!isKeyProvider(provider)) {
+        throw new NotFoundError("Provedor desconhecido.")
+      }
+      const body = providerKeySchema.parse(req.body)
+      const key = await saveProviderKey(provider, body.key, actor.id)
+      // Catálogo muda junto com a chave (novos modelos aparecem/somem).
+      invalidateModelProbeCache()
+      return { key }
+    },
+  )
+
+  app.delete<{ Params: { provider: string } }>(
+    "/api/admin/provider-keys/:provider",
+    async (req) => {
+      const user = await resolveUser(req)
+      const actor = await loadActorProfile(user.userId, user.email)
+      await assertStaff(actor)
+      const provider = req.params.provider
+      if (!isKeyProvider(provider)) {
+        throw new NotFoundError("Provedor desconhecido.")
+      }
+      await deleteProviderKey(provider)
+      invalidateModelProbeCache()
+      return { ok: true }
+    },
+  )
+
+  // --- Chaves DEDICADAS por usuário (atribuídas pelo admin) -----------------
+  // Mesma tabela do BYOK (agent_user_api_keys): a chave que o admin dedica ao
+  // usuário é exatamente a que ele usaria se cadastrasse a própria.
+
+  app.get<{ Params: { id: string } }>(
+    "/api/admin/users/:id/keys",
+    async (req) => {
+      const user = await resolveUser(req)
+      const actor = await loadActorProfile(user.userId, user.email)
+      await assertStaff(actor)
+      if (!keyManagementEnabled()) return { enabled: false, keys: [] }
+      const keys = await listUserKeys(req.params.id)
+      return { enabled: true, keys }
+    },
+  )
+
+  app.put<{ Params: { id: string; provider: string } }>(
+    "/api/admin/users/:id/keys/:provider",
+    async (req, reply) => {
+      const user = await resolveUser(req)
+      const actor = await loadActorProfile(user.userId, user.email)
+      await assertStaff(actor)
+      if (!keyManagementEnabled()) {
+        reply.code(503)
+        return {
+          message:
+            "Defina USER_API_KEYS_SECRET no ambiente do AgentCore para gerenciar chaves pelo painel.",
+        }
+      }
+      const provider = req.params.provider
+      if (!isKeyProvider(provider)) {
+        throw new NotFoundError("Provedor desconhecido.")
+      }
+      const body = providerKeySchema.parse(req.body)
+      const key = await saveUserKey(req.params.id, provider, body.key)
+      return { key }
+    },
+  )
+
+  app.delete<{ Params: { id: string; provider: string } }>(
+    "/api/admin/users/:id/keys/:provider",
+    async (req) => {
+      const user = await resolveUser(req)
+      const actor = await loadActorProfile(user.userId, user.email)
+      await assertStaff(actor)
+      const provider = req.params.provider
+      if (!isKeyProvider(provider)) {
+        throw new NotFoundError("Provedor desconhecido.")
+      }
+      await deleteUserKey(req.params.id, provider)
+      return { ok: true }
+    },
+  )
 
   const bulkSchema = z.object({
     ids: z.array(z.string().min(1)).min(1).max(500),

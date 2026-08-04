@@ -17,6 +17,8 @@ export interface ProfileAdminRow {
   avatar_url: string | null
   role: DexterRole
   disabled_at: string | null
+  /** Modelos liberados (ids provider:modelo). null = todos os habilitados. */
+  allowed_models: string[] | null
   created_at: string
   updated_at: string
   last_sign_in_at: string | null
@@ -157,7 +159,7 @@ export async function listAdminUsers(): Promise<ProfileAdminRow[]> {
   const { data, error } = await supabase
     .from("profiles")
     .select(
-      "id, email, full_name, avatar_url, role, disabled_at, created_at, updated_at",
+      "id, email, full_name, avatar_url, role, disabled_at, allowed_models, created_at, updated_at",
     )
     .order("created_at", { ascending: false })
 
@@ -173,6 +175,7 @@ export async function listAdminUsers(): Promise<ProfileAdminRow[]> {
     avatar_url: (row.avatar_url as string | null) ?? null,
     role: normalizeRole(row.role),
     disabled_at: (row.disabled_at as string | null) ?? null,
+    allowed_models: (row.allowed_models as string[] | null) ?? null,
     created_at: row.created_at as string,
     updated_at: row.updated_at as string,
     last_sign_in_at: signIns.get(row.id as string) ?? null,
@@ -182,6 +185,8 @@ export async function listAdminUsers(): Promise<ProfileAdminRow[]> {
 export interface PatchUserInput {
   role?: DexterRole
   disabled?: boolean
+  /** null = liberar todos os modelos; array = restringir a estes ids. */
+  allowed_models?: string[] | null
 }
 
 export async function patchAdminUser(
@@ -192,7 +197,7 @@ export async function patchAdminUser(
   const { data: target, error: readErr } = await supabase
     .from("profiles")
     .select(
-      "id, email, full_name, avatar_url, role, disabled_at, created_at, updated_at",
+      "id, email, full_name, avatar_url, role, disabled_at, allowed_models, created_at, updated_at",
     )
     .eq("id", targetId)
     .maybeSingle()
@@ -252,10 +257,25 @@ export async function patchAdminUser(
     }
   }
 
+  // Restringir modelos de admin/master não faz sentido (staff vê tudo).
+  if (
+    patch.allowed_models !== undefined &&
+    patch.allowed_models !== null &&
+    targetRole !== "user" &&
+    !(patch.role === "user")
+  ) {
+    throw new ForbiddenError(
+      "Modelos só podem ser restringidos para usuários comuns.",
+    )
+  }
+
   const update: Record<string, unknown> = {}
   if (patch.role !== undefined) update.role = patch.role
   if (patch.disabled === true) update.disabled_at = new Date().toISOString()
   if (patch.disabled === false) update.disabled_at = null
+  if (patch.allowed_models !== undefined) {
+    update.allowed_models = patch.allowed_models
+  }
 
   if (Object.keys(update).length === 0) {
     throw new Error("Nenhuma alteração informada.")
@@ -266,7 +286,7 @@ export async function patchAdminUser(
     .update(update)
     .eq("id", targetId)
     .select(
-      "id, email, full_name, avatar_url, role, disabled_at, created_at, updated_at",
+      "id, email, full_name, avatar_url, role, disabled_at, allowed_models, created_at, updated_at",
     )
     .single()
 
@@ -297,6 +317,7 @@ export async function patchAdminUser(
     avatar_url: (updated.avatar_url as string | null) ?? null,
     role: normalizeRole(updated.role),
     disabled_at: (updated.disabled_at as string | null) ?? null,
+    allowed_models: (updated.allowed_models as string[] | null) ?? null,
     created_at: updated.created_at as string,
     updated_at: updated.updated_at as string,
     last_sign_in_at: signIns.get(updated.id as string) ?? null,

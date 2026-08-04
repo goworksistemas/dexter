@@ -18,9 +18,10 @@
  * - Timeouts por chamada e por run inteiro.
  * - Tool results grandes são truncados antes de voltar ao modelo.
  */
-import Anthropic from "@anthropic-ai/sdk"
+import type Anthropic from "@anthropic-ai/sdk"
 
 import { config } from "../config.js"
+import { getAnthropicClient } from "../lib/anthropic.js"
 import { erroSanitizado } from "../lib/erro-modelo.js"
 import { responseMaxTokens } from "../llm/models.js"
 import type { ConnectorRuntime } from "../connectors/types.js"
@@ -72,6 +73,8 @@ export interface AgentLoopOptions {
   maxRounds?: number
   /** limite total de tool calls (default: config). */
   maxSteps?: number
+  /** Chave Anthropic a usar (BYOK/global). Sem ela, resolve a global. */
+  apiKey?: string
 }
 
 export interface AgentLoopResult {
@@ -84,11 +87,6 @@ export interface AgentLoopResult {
   steps: number
 }
 
-let client: Anthropic | null = null
-function getClient(): Anthropic {
-  if (!client) client = new Anthropic({ apiKey: config.ANTHROPIC_API_KEY })
-  return client
-}
 
 /** Quantas vezes um mesmo turno pode ser emendado após bater o `max_tokens`. */
 const MAX_CONTINUACOES = 3
@@ -387,7 +385,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           : undefined
       const signal = combineSignals(opts.signal, callSignal)
 
-      const stream = getClient().messages.stream(
+      const stream = (await getAnthropicClient(opts.apiKey)).messages.stream(
         {
           model: opts.model,
           max_tokens: maxTokens,

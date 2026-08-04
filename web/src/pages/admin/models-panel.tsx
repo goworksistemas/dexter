@@ -1,4 +1,5 @@
 import * as React from "react"
+import { Link } from "react-router-dom"
 import { toast } from "sonner"
 import {
   ArrowDown,
@@ -8,6 +9,7 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
+  KeyRound,
   Loader2,
   RefreshCw,
   Search,
@@ -32,6 +34,8 @@ const PROVIDERS: AdminModelProvider[] = [
   "anthropic",
   "openai",
   "gemini",
+  "deepseek",
+  "xai",
   "ollama",
 ]
 
@@ -41,6 +45,8 @@ function providerLabel(p: AdminModelProvider): string {
   if (p === "anthropic") return "Claude"
   if (p === "openai") return "OpenAI"
   if (p === "gemini") return "Gemini"
+  if (p === "deepseek") return "DeepSeek"
+  if (p === "xai") return "Grok"
   return "Ollama"
 }
 
@@ -325,16 +331,24 @@ export function AdminModelsPanel() {
             Contexto/max out só quando o provider informa — sem chute manual.
           </p>
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          className="gap-1.5"
-          disabled={loading || bulkBusy || busyId !== null}
-          onClick={() => void load()}
-        >
-          <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-          Atualizar
-        </Button>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" className="gap-1.5" asChild>
+            <Link to="/admin/chaves">
+              <KeyRound className="size-3.5" />
+              Chaves & acessos
+            </Link>
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5"
+            disabled={loading || bulkBusy || busyId !== null}
+            onClick={() => void load()}
+          >
+            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+            Atualizar
+          </Button>
+        </div>
       </div>
 
       {loading ? (
@@ -359,7 +373,8 @@ export function AdminModelsPanel() {
         <div className="space-y-2 p-4 text-sm text-muted-foreground">
           <p>Nenhum modelo descoberto.</p>
           <p>
-            Confira as keys no Infisical e reinicie o AgentCore.
+            Cadastre as chaves dos provedores no cartão acima ou confira o
+            servidor Ollama.
           </p>
         </div>
       ) : (

@@ -18,6 +18,7 @@ import connectorsRoutes from "./routes/connectors.js"
 import modelsRoutes from "./routes/models.js"
 import projectsRoutes from "./routes/projects.js"
 import transcribeRoutes from "./routes/transcribe.js"
+import userKeysRoutes from "./routes/user-keys.js"
 import workflowsRoutes from "./routes/workflows.js"
 import { AuthError, ForbiddenError, NotFoundError } from "./services/auth.js"
 import {
@@ -104,6 +105,7 @@ await app.register(connectionsRoutes)
 await app.register(connectorsRoutes)
 await app.register(modelsRoutes)
 await app.register(transcribeRoutes)
+await app.register(userKeysRoutes)
 await app.register(workflowsRoutes)
 await app.register(adminRoutes)
 

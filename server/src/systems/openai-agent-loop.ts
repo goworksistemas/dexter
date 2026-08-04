@@ -7,6 +7,7 @@ import {
   buildOcUserContent,
   streamOpenAiCompatible,
   type OcMessage,
+  type OcProvider,
   type OcToolCall,
 } from "../lib/openai-compatible.js"
 import { isImageGenerationModel } from "../llm/capabilities.js"
@@ -31,7 +32,7 @@ import type {
 } from "./agent-loop.js"
 
 export interface OpenAiAgentLoopOptions {
-  provider: "openai" | "gemini"
+  provider: OcProvider
   model: string
   systemPrompt: string
   /** Histórico user/assistant em texto. */
@@ -53,6 +54,8 @@ export interface OpenAiAgentLoopOptions {
   onProgress?: (evt: AgentProgressEvent) => void
   maxRounds?: number
   maxSteps?: number
+  /** Chave a usar (BYOK/global). Sem ela, resolve a global (banco → env). */
+  apiKey?: string
 }
 
 function truncarToolResult(raw: string, max: number): string {
@@ -145,6 +148,7 @@ export async function runOpenAiAgentLoop(
         allowTools: allowTools && tools.length > 0,
         maxTokens,
         signal: opts.signal,
+        apiKey: opts.apiKey,
       },
       (delta) => {
         status("Gerando resposta")
