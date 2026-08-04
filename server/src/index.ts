@@ -117,20 +117,38 @@ app.addHook("onClose", async () => {
 })
 
 async function start(): Promise<void> {
-  try {
-    await app.listen({ port: config.PORT, host: config.HOST })
-    for (const line of connectorsBootSummary()) {
-      app.log.info(`[connectors] ${line}`)
+  const maxAttempts = 8
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await app.listen({ port: config.PORT, host: config.HOST })
+      for (const line of connectorsBootSummary()) {
+        app.log.info(`[connectors] ${line}`)
+      }
+      // Sem service role não há como executar workflow (escrita bypassa RLS).
+      if (config.SUPABASE_SERVICE_ROLE_KEY) {
+        startWorkflowRunner()
+      } else {
+        app.log.warn(
+          "[workflows] agendador desligado — sem SUPABASE_SERVICE_ROLE_KEY",
+        )
+      }
+      return
+    } catch (err) {
+      const code =
+        err && typeof err === "object" && "code" in err
+          ? String((err as { code?: unknown }).code)
+          : ""
+      if (code === "EADDRINUSE" && attempt < maxAttempts) {
+        app.log.warn(
+          { attempt, port: config.PORT },
+          "porta ocupada — aguardando processo stale liberar",
+        )
+        await new Promise((r) => setTimeout(r, 500 * attempt))
+        continue
+      }
+      app.log.error(err)
+      process.exit(1)
     }
-    // Sem service role não há como executar workflow (escrita bypassa RLS).
-    if (config.SUPABASE_SERVICE_ROLE_KEY) {
-      startWorkflowRunner()
-    } else {
-      app.log.warn("[workflows] agendador desligado — sem SUPABASE_SERVICE_ROLE_KEY")
-    }
-  } catch (err) {
-    app.log.error(err)
-    process.exit(1)
   }
 }
 

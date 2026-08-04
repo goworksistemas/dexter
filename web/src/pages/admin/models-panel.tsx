@@ -60,11 +60,10 @@ function formatReleasedAt(iso?: string | null): string {
   })
 }
 
+/** Valor exato — sem arredondar pra "128k" / "1M". */
 function formatTokens(n?: number | null): string {
   if (n == null || !Number.isFinite(n) || n <= 0) return "—"
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`
-  if (n >= 1_000) return `${Math.round(n / 1_000)}k`
-  return String(n)
+  return Math.floor(n).toLocaleString("pt-BR")
 }
 
 type VisibilityFilter = "all" | "visible" | "hidden"
@@ -74,24 +73,27 @@ type SortKey =
   | "released_at"
   | "input_token_limit"
   | "max_output_tokens"
+  | "cost_avg"
   | "input_usd_per_million"
   | "output_usd_per_million"
-  | "cost_avg"
   | "status"
   | "provider"
 
+type SortDir = "asc" | "desc"
+
+/** Média aritmética in/out quando os dois existem; senão o que houver. */
 function avgCostUsd(m: {
   input_usd_per_million?: number | null
   output_usd_per_million?: number | null
 }): number | null {
-  const vals = [m.input_usd_per_million, m.output_usd_per_million].filter(
+  const a = m.input_usd_per_million
+  const b = m.output_usd_per_million
+  const vals = [a, b].filter(
     (n): n is number => n != null && Number.isFinite(n) && n >= 0,
   )
   if (vals.length === 0) return null
-  return vals.reduce((a, b) => a + b, 0) / vals.length
+  return vals.reduce((x, y) => x + y, 0) / vals.length
 }
-
-type SortDir = "asc" | "desc"
 
 const NO_VISIBLE_MODEL_MSG =
   "Deixe ao menos um modelo visível — o chat para de funcionar sem nenhum."
@@ -131,7 +133,8 @@ export function AdminModelsPanel() {
   }, [])
 
   React.useEffect(() => {
-    void load({ probe: false })
+    // Sempre rediscobre ao abrir a aba — cache frio/vazio escondia chaves ok.
+    void load({ probe: true })
   }, [load])
 
   const providerLabel = React.useCallback(
@@ -212,6 +215,15 @@ export function AdminModelsPanel() {
           else cmp = ta - tb
           break
         }
+        case "cost_avg": {
+          const ta = avgCostUsd(a)
+          const tb = avgCostUsd(b)
+          if (ta == null && tb == null) cmp = 0
+          else if (ta == null) cmp = 1
+          else if (tb == null) cmp = -1
+          else cmp = ta - tb
+          break
+        }
         case "input_usd_per_million": {
           const ta = num(a.input_usd_per_million)
           const tb = num(b.input_usd_per_million)
@@ -224,15 +236,6 @@ export function AdminModelsPanel() {
         case "output_usd_per_million": {
           const ta = num(a.output_usd_per_million)
           const tb = num(b.output_usd_per_million)
-          if (ta == null && tb == null) cmp = 0
-          else if (ta == null) cmp = 1
-          else if (tb == null) cmp = -1
-          else cmp = ta - tb
-          break
-        }
-        case "cost_avg": {
-          const ta = avgCostUsd(a)
-          const tb = avgCostUsd(b)
           if (ta == null && tb == null) cmp = 0
           else if (ta == null) cmp = 1
           else if (tb == null) cmp = -1
@@ -882,10 +885,9 @@ export function AdminModelsPanel() {
                                         Contexto (entrada)
                                       </dt>
                                       <dd className="mt-0.5 tabular-nums text-foreground">
-                                        {formatTokens(m.input_token_limit)}
                                         {m.input_token_limit
-                                          ? ` tokens (${m.input_token_limit.toLocaleString("pt-BR")})`
-                                          : ""}
+                                          ? `${formatTokens(m.input_token_limit)} tokens`
+                                          : "— (fonte não publica)"}
                                       </dd>
                                     </div>
                                     <div>
@@ -893,10 +895,9 @@ export function AdminModelsPanel() {
                                         Max output
                                       </dt>
                                       <dd className="mt-0.5 tabular-nums text-foreground">
-                                        {formatTokens(m.max_output_tokens)}
                                         {m.max_output_tokens
-                                          ? ` tokens (${m.max_output_tokens.toLocaleString("pt-BR")})`
-                                          : ""}
+                                          ? `${formatTokens(m.max_output_tokens)} tokens`
+                                          : "— (fonte não publica)"}
                                       </dd>
                                     </div>
                                     <div>
@@ -905,7 +906,8 @@ export function AdminModelsPanel() {
                                       </dt>
                                       <dd className="mt-0.5 tabular-nums text-foreground">
                                         {formatUsdPerMillion(m.input_usd_per_million)} entrada ·{" "}
-                                        {formatUsdPerMillion(m.output_usd_per_million)} saída
+                                        {formatUsdPerMillion(m.output_usd_per_million)} saída ·{" "}
+                                        {formatUsdPerMillion(avgCostUsd(m))} méd.
                                         <span className="mt-1 block text-[10px] text-muted-foreground">
                                           Sync automático (LiteLLM + OpenRouter)
                                         </span>

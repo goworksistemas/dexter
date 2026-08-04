@@ -295,7 +295,6 @@ export function ChatsPage() {
                       {title}
                     </span>
                     {runningChatIds.has(chat.id) ? <RunningDots /> : null}
-                    <ChatCostInfo costUsd={chat.cost_usd} />
                     {project ? (
                       <span className="hidden max-w-40 shrink-0 truncate rounded border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground sm:inline">
                         {project}
@@ -305,6 +304,10 @@ export function ChatsPage() {
                       {formatRelative(chat.updated_at)}
                     </span>
                   </button>
+                  <ChatCostInfo
+                    costUsd={chat.cost_usd}
+                    className="mr-0.5 shrink-0"
+                  />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button

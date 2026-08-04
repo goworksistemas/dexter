@@ -1,7 +1,8 @@
 /**
- * Catálogos públicos (LiteLLM + OpenRouter): preços USD/1M e metadados
- * (contexto, max out, data de criação, descrição) para preencher buracos
- * que as APIs dos providers não devolvem (OpenAI/xAI/DeepSeek list).
+ * Catálogos públicos para preencher buracos das APIs dos providers.
+ * - Contexto (input): só LiteLLM `max_input_tokens` (nunca OpenRouter).
+ * - Preço/descrição/data: LiteLLM + OpenRouter.
+ * Sem chute: se a fonte não tiver o campo, fica null.
  */
 import { supabase } from "../lib/supabase.js"
 import { invalidateModelPricingCache } from "./model-pricing.js"
@@ -12,6 +13,8 @@ const LITELLM_PRICES_URL =
 const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 const SYNC_CACHE_MS = 6 * 60 * 60 * 1000
+/** Bump quando a semântica do merge muda (ex.: contexto sem OpenRouter). */
+const SOURCE_SCHEMA_VERSION = 2
 
 interface CatalogRef {
   id: string
@@ -72,6 +75,7 @@ interface SourceEntry {
 
 let sourceCache: {
   at: number
+  version: number
   byKey: Map<string, SourceEntry>
 } | null = null
 
@@ -158,9 +162,16 @@ async function loadLiteLLM(map: Map<string, SourceEntry>): Promise<void> {
             output_usd_per_million: output ?? 0,
           }
         : null
+    // Contexto EXATO: só max_input_tokens. Nunca usar max_tokens (às vezes é output).
     const maxIn = positiveInt(entry.max_input_tokens)
+    const maxOutExplicit = positiveInt(entry.max_output_tokens)
+    const maxTokens = positiveInt(entry.max_tokens)
+    // max_tokens só como max out se for distinto do contexto (evita chutar saída = janela).
     const maxOut =
-      positiveInt(entry.max_output_tokens) ?? positiveInt(entry.max_tokens)
+      maxOutExplicit ??
+      (maxTokens != null && maxIn != null && maxTokens !== maxIn
+        ? maxTokens
+        : maxOutExplicit)
     const meta: PublicModelMeta = {
       inputTokenLimit: maxIn,
       maxOutputTokens: maxOut,
@@ -201,10 +212,10 @@ async function loadOpenRouter(map: Map<string, SourceEntry>): Promise<void> {
     const modalitiesIn = m.architecture?.input_modalities ?? []
     const modalitiesOut = m.architecture?.output_modalities ?? []
     const desc = m.description?.trim() || null
+    // OpenRouter NÃO define contexto: context_length costuma ser rota/estendido
+    // (ex.: Claude 1M), não o limite exato da API direta do provider.
     const meta: PublicModelMeta = {
-      inputTokenLimit:
-        positiveInt(m.context_length) ??
-        positiveInt(m.top_provider?.context_length),
+      inputTokenLimit: null,
       maxOutputTokens: positiveInt(m.top_provider?.max_completion_tokens),
       releasedAt: toIsoFromUnix(m.created),
       description: desc && desc.length > 400 ? `${desc.slice(0, 397)}...` : desc,
@@ -225,16 +236,37 @@ async function loadOpenRouter(map: Map<string, SourceEntry>): Promise<void> {
 }
 
 async function catalogSources(): Promise<Map<string, SourceEntry>> {
-  if (sourceCache && Date.now() - sourceCache.at < SYNC_CACHE_MS) {
+  if (
+    sourceCache &&
+    sourceCache.version === SOURCE_SCHEMA_VERSION &&
+    Date.now() - sourceCache.at < SYNC_CACHE_MS
+  ) {
     return sourceCache.byKey
   }
   const byKey = new Map<string, SourceEntry>()
-  await Promise.all([
-    loadLiteLLM(byKey).catch(() => {}),
-    loadOpenRouter(byKey).catch(() => {}),
-  ])
-  sourceCache = { at: Date.now(), byKey }
+  // Sequencial: LiteLLM primeiro (contexto + preço).
+  // OpenRouter só preço/descrição/data — nunca contexto.
+  await loadLiteLLM(byKey).catch(() => {})
+  await loadOpenRouter(byKey).catch(() => {})
+  sourceCache = { at: Date.now(), version: SOURCE_SCHEMA_VERSION, byKey }
   return byKey
+}
+
+/** Aliases Anthropic datados → IDs curtos do OpenRouter (claude-sonnet-4.5). */
+function anthropicAliasKeys(bare: string): string[] {
+  const noDate = bare.replace(/-\d{8}$/, "")
+  const dotted = noDate.replace(/(\d+)-(\d+)(?=-|$)/g, "$1.$2")
+  const out = new Set<string>([
+    `anthropic/${bare}`,
+    bare,
+    noDate,
+    `anthropic/${noDate}`,
+  ])
+  if (dotted !== noDate) {
+    out.add(dotted)
+    out.add(`anthropic/${dotted}`)
+  }
+  return [...out]
 }
 
 function candidateKeys(ref: CatalogRef): string[] {
@@ -260,7 +292,7 @@ function candidateKeys(ref: CatalogRef): string[] {
     keys.unshift(`openai/${bare}`)
   }
   if (provider === "anthropic") {
-    keys.unshift(`anthropic/${bare}`)
+    keys.unshift(...anthropicAliasKeys(bare))
   }
   return keys
 }
@@ -269,16 +301,10 @@ function lookupEntry(
   ref: CatalogRef,
   byKey: Map<string, SourceEntry>,
 ): SourceEntry | null {
+  // Só chaves candidatas explícitas — sem endsWith frouxo (evita gpt-4 → gpt-4o).
   for (const key of candidateKeys(ref)) {
     const hit = byKey.get(key)
     if (hit) return hit
-  }
-
-  // Match exato por sufixo /model (sem startsWith frouxo — evita gpt-4 → gpt-4o).
-  const bare = ref.model.replace(/^models\//, "")
-  for (const [key, entry] of byKey) {
-    if (key === bare) return entry
-    if (key.endsWith(`/${bare}`) || key.endsWith(`:${bare}`)) return entry
   }
   return null
 }
@@ -367,8 +393,9 @@ export interface EnrichableDiscovered {
 }
 
 /**
- * Preenche buracos de metadata com LiteLLM/OpenRouter.
- * Nunca sobrescreve o que a API do provider já informou.
+ * Preenche buracos de metadata.
+ * Contexto (inputTokenLimit): só API do provider ou LiteLLM max_input_tokens.
+ * Nunca sobrescreve o que a API do provider já informou. Sem chute: null fica null.
  */
 export async function enrichDiscoveredFromPublicCatalog<
   T extends EnrichableDiscovered,
@@ -387,8 +414,14 @@ export async function enrichDiscoveredFromPublicCatalog<
     if (!entry) return d
 
     const meta = entry.meta
-    const inputTokenLimit = d.inputTokenLimit ?? meta.inputTokenLimit
-    const maxOutputTokens = d.maxOutputTokens ?? meta.maxOutputTokens
+    const inputTokenLimit =
+      d.inputTokenLimit != null && d.inputTokenLimit > 0
+        ? d.inputTokenLimit
+        : meta.inputTokenLimit
+    const maxOutputTokens =
+      d.maxOutputTokens != null && d.maxOutputTokens > 0
+        ? d.maxOutputTokens
+        : meta.maxOutputTokens
     const releasedAt = d.releasedAt ?? meta.releasedAt
     const description =
       d.description?.trim() || meta.description?.trim() || ""

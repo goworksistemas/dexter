@@ -117,7 +117,7 @@ export function ChatsSection({
                 onClick={() => onSelect(chat)}
                 className={cn(
                   sidebarRowClass,
-                  "flex-1 hover:bg-transparent",
+                  "min-w-0 flex-1 hover:bg-transparent",
                   active && sidebarRowActiveClass,
                   active && "bg-transparent",
                 )}
@@ -128,12 +128,12 @@ export function ChatsSection({
                 />
                 <span className="min-w-0 flex-1 truncate">{title}</span>
                 {running ? <RunningDots /> : null}
-                <ChatCostInfo
-                  costUsd={chat.cost_usd}
-                  compact
-                  className="opacity-100 md:opacity-0 md:group-hover/item:opacity-100"
-                />
               </button>
+              <ChatCostInfo
+                costUsd={chat.cost_usd}
+                compact
+                className="opacity-100 md:opacity-0 md:group-hover/item:opacity-100"
+              />
               <Button
                 variant="ghost"
                 size="icon-sm"

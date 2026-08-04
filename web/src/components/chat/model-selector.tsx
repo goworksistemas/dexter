@@ -1,6 +1,6 @@
 /**
- * Seletor de modelo — modal com tabs, busca e ordenação simples.
- * Custo em faixa geral (Grátis / Econômico / Moderado / Caro / Premium).
+ * Seletor de modelo — modal com tabs, busca e ordenação.
+ * Preços reais: entrada e saída USD/1M (sem média).
  */
 import * as React from "react"
 import {
@@ -30,7 +30,6 @@ import {
   KEY_SOURCE_LABEL,
   keySourceClass,
   modelContextHint,
-  modelAvgCostLabel,
   modelCostScore,
   modelCostTier,
   modelCostTierClass,
@@ -39,6 +38,8 @@ import {
   modelHasPaidPrice,
   modelKeySource,
   modelPricingDetail,
+  modelPricingHeadline,
+  modelPricingTag,
   providerShortLabel,
   type ModelInfo,
   type ModelProvider,
@@ -83,7 +84,7 @@ function ModelPricingTag({ model }: { model: ModelInfo }) {
   const tier = modelCostTier(model)
   return (
     <Tag
-      label={modelAvgCostLabel(model)}
+      label={modelPricingTag(model)}
       title={modelPricingDetail(model)}
       className={modelCostTierClass(tier)}
     />
@@ -161,7 +162,7 @@ function ModelPickRow({
   const ctx = modelContextHint(model)
   const prov = providerShortLabel(model)
   const tier = modelCostTier(model)
-  const avg = modelAvgCostLabel(model)
+  const price = modelPricingHeadline(model)
   const paid = modelHasPaidPrice(model)
 
   return (
@@ -189,11 +190,12 @@ function ModelPickRow({
               modelCostTierTextClass(tier),
             )}
           >
-            {paid ? avg : "Grátis"}
+            {price}
           </span>
           {paid ? (
             <span className="text-[11px] text-muted-foreground">
-              por 1M tokens (média) · {modelCostTierLabel(tier)}
+              média (in+out)/2 · in · out · USD/1M ·{" "}
+              {modelCostTierLabel(tier)}
             </span>
           ) : (
             <span className="text-[11px] text-muted-foreground">
@@ -280,7 +282,8 @@ export function ModelSelector({
           m.id.toLowerCase().includes(q) ||
           (m.description ?? "").toLowerCase().includes(q) ||
           providerShortLabel(m).toLowerCase().includes(q) ||
-          modelAvgCostLabel(m).toLowerCase().includes(q) ||
+          modelPricingTag(m).toLowerCase().includes(q) ||
+          modelPricingDetail(m).toLowerCase().includes(q) ||
           modelCostTierLabel(modelCostTier(m)).toLowerCase().includes(q),
       )
     }
@@ -362,8 +365,8 @@ export function ModelSelector({
           <DialogHeader className="shrink-0 space-y-1 border-b border-border px-4 py-3 text-left">
             <DialogTitle>Escolher modelo</DialogTitle>
             <DialogDescription>
-              O preço é a média entre entrada e saída, em USD por 1 milhão de
-              tokens. Ordene pelo mais barato se quiser economizar.
+              Preço em USD/1M tokens: média (in+out)/2, entrada e saída. Ordene
+              pelo mais barato (entrada, depois saída).
             </DialogDescription>
           </DialogHeader>
 

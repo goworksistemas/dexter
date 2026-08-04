@@ -2,8 +2,8 @@
  * Catálogo DINÂMICO de modelos — descoberto nas APIs dos providers.
  * Chaves vêm do banco (painel admin) com env como fallback (services/llm-keys).
  * Admin só guarda overrides (hide/default/rótulo).
- * Descrição, tokens e capabilities: API do provider primeiro; buracos
- * preenchidos com LiteLLM/OpenRouter (sem hardcode por modelo).
+ * Descrição/tokens/capabilities: API do provider primeiro.
+ * Contexto ausente: só LiteLLM max_input_tokens (valor publicado, sem chute).
  */
 import { config } from "../config.js"
 import { getGlobalKey, type KeyProvider } from "../services/llm-keys.js"
@@ -236,10 +236,16 @@ function capsFromGeminiApi(
   return { vision, files, imageGeneration }
 }
 
+/** Contexto publicado no /api/show do Ollama (campo *context_length / num_ctx). */
 function numFromModelInfo(info: Record<string, unknown> | undefined): number | null {
   if (!info) return null
   for (const [k, v] of Object.entries(info)) {
     if (/context_length$/i.test(k) && typeof v === "number" && v > 0) {
+      return Math.floor(v)
+    }
+  }
+  for (const [k, v] of Object.entries(info)) {
+    if (/(^|[._])num_ctx$/i.test(k) && typeof v === "number" && v > 0) {
       return Math.floor(v)
     }
   }
@@ -608,7 +614,7 @@ async function discoverOllama(): Promise<Discovered[]> {
           const detailsText =
             show.detailsText ||
             [meta.parameter_size, meta.family].filter(Boolean).join(" · ")
-          const ctx = show.context
+          // Contexto vem do model_info (*context_length). Max out o Ollama não publica.
           return {
             provider: "ollama" as const,
             model: name,
@@ -616,8 +622,8 @@ async function discoverOllama(): Promise<Discovered[]> {
             description: apiDescriptionOnly(detailsText || null),
             traits: capabilityTraits(show.capabilities),
             capabilities: show.capabilities,
-            maxOutputTokens: ctx,
-            inputTokenLimit: ctx,
+            maxOutputTokens: null,
+            inputTokenLimit: show.context,
             releasedAt: toIsoDate(meta.modified_at),
             latencyMs,
             ok: true as const,
@@ -750,19 +756,11 @@ async function discoverCatalog(): Promise<ProbedModel[]> {
       model: d.model,
     }))
   await ensureModelPricingRows(catalogRefs.map((c) => c.id)).catch(() => {})
-  // LiteLLM/OpenRouter: contexto, max out, data e descrição onde a API falha.
-  const enriched = (
-    await enrichDiscoveredFromPublicCatalog(discovered).catch(() => discovered)
-  ).map((d) =>
-    d.ok && d.model !== "_error"
-      ? { ...d, traits: capabilityTraits(d.capabilities) }
-      : d,
-  )
-  // Preços em background — não bloqueia o catálogo se o feed estiver lento.
-  void syncCatalogPricing(catalogRefs).catch(() => {})
+  // Metadados públicos (contexto/preço) NÃO bloqueiam o catálogo — se o feed
+  // travar, o admin/chat ainda listam os modelos das APIs dos providers.
   const [overrides, providers] = await Promise.all([
     listModelOverrides().catch(() => [] as ModelOverride[]),
-    providerMetaMap(),
+    providerMetaMap().catch(() => new Map()),
   ])
   const providerDefaults = new Map(
     [...providers.entries()].map(([id, p]) => [
@@ -770,15 +768,43 @@ async function discoverCatalog(): Promise<ProbedModel[]> {
       { label: p.label, default_cost_tier: p.default_cost_tier },
     ]),
   )
-  const models = applyOverrides(enriched, overrides, providerDefaults)
-  const priced = await enrichModelsWithPricing(models).catch(() =>
-    models.map((m) => ({
+  const baseModels = applyOverrides(discovered, overrides, providerDefaults)
+  const priced = await enrichModelsWithPricing(baseModels).catch(() =>
+    baseModels.map((m) => ({
       ...m,
       inputUsdPerMillion: null,
       outputUsdPerMillion: null,
     })),
   )
   catalogCache = { at: Date.now(), models: priced }
+
+  void (async () => {
+    try {
+      const enrichedDisc = await enrichDiscoveredFromPublicCatalog(discovered)
+      const withTraits = enrichedDisc.map((d) =>
+        d.ok && d.model !== "_error"
+          ? { ...d, traits: capabilityTraits(d.capabilities) }
+          : d,
+      )
+      const [ov, prov] = await Promise.all([
+        listModelOverrides().catch(() => [] as ModelOverride[]),
+        providerMetaMap().catch(() => new Map()),
+      ])
+      const defaults = new Map(
+        [...prov.entries()].map(([id, p]) => [
+          id,
+          { label: p.label, default_cost_tier: p.default_cost_tier },
+        ]),
+      )
+      const models = applyOverrides(withTraits, ov, defaults)
+      const next = await enrichModelsWithPricing(models).catch(() => models)
+      catalogCache = { at: Date.now(), models: next }
+      await syncCatalogPricing(catalogRefs).catch(() => {})
+    } catch {
+      /* enrich/sync é best-effort */
+    }
+  })()
+
   return priced
 }
 

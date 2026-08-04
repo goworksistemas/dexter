@@ -11,6 +11,10 @@ const timeoutMs = Number.parseInt(process.argv[3] ?? '60000', 10)
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const startedAt = Date.now()
 
+// Evita falso positivo: processo stale na porta responde healthz antes do
+// Infisical+tsx subir (e o server novo então toma EADDRINUSE).
+await sleep(2500)
+
 while (Date.now() - startedAt < timeoutMs) {
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(2000) })
