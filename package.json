@@ -1,6 +1,6 @@
 {
   "name": "dexter",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "description": "Dexter — AgentCore (Fastify, :8787) + web (Vite, :5273). `pnpm dev` sobe os dois.",
