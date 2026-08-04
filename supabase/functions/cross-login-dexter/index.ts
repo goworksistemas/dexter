@@ -2,16 +2,20 @@
  * Cross-login NetworkGo -> Dexter.
  *
  * O front do NetworkGo (logado) faz POST { access_token } aqui; a funcao valida o
- * token no projeto Supabase do NetworkGo, confirma que o mesmo e-mail ja existe no
- * Dexter e devolve um magic link (action_link) para redirecionar o browser.
+ * token no projeto Supabase do NetworkGo, garante a conta no Dexter (ver abaixo)
+ * e devolve um magic link (action_link) para redirecionar o browser.
  *
- * NAO auto-provisiona usuarios. Atencao: generateLink({ type: 'magiclink' }) CRIA
- * o usuario caso nao exista (comportamento documentado do Supabase). Por isso a
- * existencia e checada ANTES via RPC check_user_exists_by_email; se o e-mail nao
- * existir no Dexter, retorna 404 e o generateLink nunca e chamado.
+ * Auto-provisiona usuarios SOMENTE de dominios da allowlist
+ * (public.dexter_allowed_email_domains, checada via RPC is_allowed_email):
+ * o e-mail vem de um access_token validado no GoTrue do NetworkGo (sessao
+ * corporativa real) e o signup do Dexter ja e aberto para esses dominios,
+ * entao criar a conta aqui nao amplia acesso — so remove atrito. A conta e
+ * criada via admin.createUser com email confirmado e full_name do NetworkGo;
+ * o trigger handle_new_user cria o profile. Fora da allowlist: 404, sem criar
+ * nada (os triggers de auth.users barrariam de qualquer forma).
  *
- * Depende da RPC public.check_user_exists_by_email(text)
- * (migration 0019_check_user_exists_by_email.sql).
+ * Depende das RPCs public.check_user_exists_by_email(text) (migration 0019)
+ * e public.is_allowed_email(text) (migration 0013).
  *
  * Config: NETWORKGO_SUPABASE_URL / NETWORKGO_SUPABASE_ANON_KEY podem ser
  * sobrescritos via secrets; os defaults abaixo sao valores PUBLICOS do
@@ -82,8 +86,28 @@ Deno.serve(async (req) => {
       { auth: { autoRefreshToken: false, persistSession: false } },
     )
 
-    // Checa a existencia ANTES de gerar o link. generateLink com magiclink
-    // criaria o usuario automaticamente; aqui barramos quem nao tem conta.
+    // Trava de dominio no servidor (a gaveta ser adminOnly e so UI; o endpoint
+    // e publico). Fora da allowlist: 404 sem criar nada.
+    const { data: emailAllowed, error: allowedError } = await dexterAdmin.rpc(
+      'is_allowed_email',
+      { p_email: email },
+    )
+
+    if (allowedError) {
+      console.error('[cross-login-dexter] Erro ao verificar dominio:', allowedError)
+      return new Response(JSON.stringify({ error: 'Erro ao verificar usuario' }), {
+        status: 500,
+        headers: jsonHeaders,
+      })
+    }
+
+    if (!emailAllowed) {
+      return new Response(JSON.stringify({ error: 'Usuario nao encontrado no Dexter' }), {
+        status: 404,
+        headers: jsonHeaders,
+      })
+    }
+
     const { data: userExists, error: existsError } = await dexterAdmin.rpc(
       'check_user_exists_by_email',
       { user_email: email },
@@ -98,10 +122,28 @@ Deno.serve(async (req) => {
     }
 
     if (!userExists) {
-      return new Response(JSON.stringify({ error: 'Usuario nao encontrado no Dexter' }), {
-        status: 404,
-        headers: jsonHeaders,
+      // Auto-provisiona: email confirmado (veio de sessao NetworkGo valida) e
+      // full_name da metadata; handle_new_user cria o profile. A conta nasce
+      // sem senha — se quiser entrar direto pelo site, usa "esqueci a senha".
+      const meta = networkGoUser.user_metadata ?? {}
+      const fullName =
+        (typeof meta.full_name === 'string' && meta.full_name.trim()) ||
+        (typeof meta.name === 'string' && meta.name.trim()) ||
+        undefined
+
+      const { error: createError } = await dexterAdmin.auth.admin.createUser({
+        email,
+        email_confirm: true,
+        user_metadata: fullName ? { full_name: fullName } : undefined,
       })
+
+      if (createError) {
+        console.error('[cross-login-dexter] Erro ao criar usuario:', createError)
+        return new Response(JSON.stringify({ error: 'Erro ao criar usuario no Dexter' }), {
+          status: 500,
+          headers: jsonHeaders,
+        })
+      }
     }
 
     const { data: linkData, error: linkError } = await dexterAdmin.auth.admin.generateLink({
