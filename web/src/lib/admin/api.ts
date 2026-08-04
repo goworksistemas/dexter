@@ -114,8 +114,22 @@ async function authHeaders(): Promise<Record<string, string>> {
 
 async function parseError(res: Response, fallback: string): Promise<string> {
   try {
-    const body = (await res.json()) as { message?: string }
+    const body = (await res.json()) as {
+      message?: string
+      // Rotas com `.parse` respondem 400 invalid_request só com o flatten do
+      // Zod (sem `message`) — a mensagem útil está aqui.
+      details?: {
+        formErrors?: string[]
+        fieldErrors?: Record<string, string[] | undefined>
+      }
+    }
     if (body.message) return body.message
+    const doZod =
+      body.details?.formErrors?.find(Boolean) ??
+      Object.values(body.details?.fieldErrors ?? {})
+        .flat()
+        .find(Boolean)
+    if (doZod) return doZod
   } catch {
     /* ignore */
   }
@@ -241,17 +255,19 @@ export async function fetchAdminModels(): Promise<{
   return res.json()
 }
 
+/**
+ * Campos aceitos pelo `modelPatchSchema` do servidor (server/src/routes/admin.ts).
+ * O schema é strict: mandar qualquer outra chave volta 400 invalid_request —
+ * mantenha os dois lados alinhados.
+ */
 export async function patchAdminModel(
   id: string,
   patch: {
     enabled?: boolean
     is_default?: boolean
-    label?: string
-    description?: string
-    traits?: string[]
-    sort_order?: number
-    api_model?: string
-    max_output_tokens?: number
+    label?: string | null
+    description?: string | null
+    sort_order?: number | null
   },
 ): Promise<AdminCatalogModel> {
   const res = await fetch(`${BASE}/models/${id}`, {
@@ -283,4 +299,93 @@ export async function bulkPatchAdminModels(
     )
   }
   return res.json()
+}
+
+export type KbCategory =
+  | "empresa"
+  | "sistemas"
+  | "projetos"
+  | "pessoas"
+  | "glossario"
+  | "geral"
+
+/** Doc markdown da base de conhecimento da empresa (contexto do Dexter). */
+export interface KbDoc {
+  id: string
+  slug: string
+  title: string
+  category: KbCategory
+  content: string
+  /** Doc desativado não entra no contexto nem aparece na tool kb__buscar. */
+  enabled: boolean
+  /** true = injetado em toda conversa (custa tokens sempre). */
+  always_load: boolean
+  sort: number
+  created_at: string
+  updated_at: string
+}
+
+export interface KbDocInput {
+  slug?: string
+  title: string
+  category: KbCategory
+  content: string
+  enabled?: boolean
+  always_load?: boolean
+  sort?: number
+}
+
+export async function fetchAdminKbDocs(): Promise<{
+  docs: KbDoc[]
+  actorRole: DexterRole
+}> {
+  const res = await fetch(`${BASE}/kb`, { headers: await authHeaders() })
+  if (!res.ok) {
+    throw new Error(await parseError(res, `GET /api/admin/kb → ${res.status}`))
+  }
+  return res.json()
+}
+
+export async function createAdminKbDoc(input: KbDocInput): Promise<KbDoc> {
+  const res = await fetch(`${BASE}/kb`, {
+    method: "POST",
+    headers: await authHeaders(),
+    body: JSON.stringify(input),
+  })
+  if (!res.ok) {
+    throw new Error(await parseError(res, `POST /api/admin/kb → ${res.status}`))
+  }
+  const body = (await res.json()) as { doc: KbDoc }
+  return body.doc
+}
+
+/** Patch parcial — mande só os campos que mudaram (ao menos um). */
+export async function patchAdminKbDoc(
+  id: string,
+  patch: Partial<KbDocInput>,
+): Promise<KbDoc> {
+  const res = await fetch(`${BASE}/kb/${id}`, {
+    method: "PATCH",
+    headers: await authHeaders(),
+    body: JSON.stringify(patch),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(res, `PATCH /api/admin/kb/${id} → ${res.status}`),
+    )
+  }
+  const body = (await res.json()) as { doc: KbDoc }
+  return body.doc
+}
+
+export async function deleteAdminKbDoc(id: string): Promise<void> {
+  const res = await fetch(`${BASE}/kb/${id}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  })
+  if (!res.ok) {
+    throw new Error(
+      await parseError(res, `DELETE /api/admin/kb/${id} → ${res.status}`),
+    )
+  }
 }

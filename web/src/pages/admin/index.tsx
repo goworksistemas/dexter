@@ -45,6 +45,7 @@ import { useAuth } from "@/providers/auth-provider"
 import type { DexterRole } from "@/types"
 import { cn } from "@/lib/utils"
 import { AdminModelsPanel } from "./models-panel"
+import { AdminKbPanel } from "./kb-panel"
 
 const PERIODS = [
   { days: 7, label: "7d" },
@@ -224,14 +225,16 @@ function ModelTable({ rows }: { rows: AdminModelStat[] }) {
 export function AdminPage() {
   const { user, isLoading: authLoading } = useAuth()
   const [adminTab, setAdminTab] = React.useState<
-    "analytics" | "models" | "users"
+    "analytics" | "models" | "kb" | "users"
   >("analytics")
   const [days, setDays] = React.useState(30)
   const [users, setUsers] = React.useState<AdminUserRow[]>([])
   const [overview, setOverview] = React.useState<AdminOverview | null>(null)
   const [actorRole, setActorRole] = React.useState<DexterRole>("user")
-  const [loading, setLoading] = React.useState(true)
-  const [error, setError] = React.useState<string | null>(null)
+  const [overviewLoading, setOverviewLoading] = React.useState(true)
+  const [overviewError, setOverviewError] = React.useState<string | null>(null)
+  const [usersLoading, setUsersLoading] = React.useState(true)
+  const [usersError, setUsersError] = React.useState<string | null>(null)
   const [query, setQuery] = React.useState("")
   const [busyId, setBusyId] = React.useState<string | null>(null)
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
@@ -241,38 +244,49 @@ export function AdminPage() {
     "messages",
   )
 
-  const isStaff =
-    user?.role === "admin" ||
-    user?.role === "master" ||
-    actorRole === "admin" ||
-    actorRole === "master"
-
-  const load = React.useCallback(async () => {
-    setLoading(true)
-    setError(null)
+  // Overview depende do período; a lista de usuários não — carregamentos separados
+  // pra trocar 7d/30d/90d sem refazer o fetch de usuários.
+  const loadOverview = React.useCallback(async () => {
+    setOverviewLoading(true)
+    setOverviewError(null)
     try {
-      const [ov, us] = await Promise.all([
-        fetchAdminOverview(days),
-        fetchAdminUsers(),
-      ])
+      const ov = await fetchAdminOverview(days)
       setOverview(ov.overview)
-      setActorRole(ov.actorRole || us.actorRole)
-      setUsers(us.users)
+      setActorRole(ov.actorRole)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Falha ao carregar.")
+      setOverviewError(
+        err instanceof Error ? err.message : "Falha ao carregar.",
+      )
     } finally {
-      setLoading(false)
+      setOverviewLoading(false)
     }
   }, [days])
 
-  React.useEffect(() => {
-    if (authLoading) return
-    if (user?.role === "admin" || user?.role === "master") {
-      void load()
-    } else {
-      setLoading(false)
+  const loadUsers = React.useCallback(async () => {
+    setUsersLoading(true)
+    setUsersError(null)
+    try {
+      const us = await fetchAdminUsers()
+      setUsers(us.users)
+      setActorRole(us.actorRole)
+    } catch (err) {
+      setUsersError(err instanceof Error ? err.message : "Falha ao carregar.")
+    } finally {
+      setUsersLoading(false)
     }
-  }, [authLoading, user?.role, load])
+  }, [])
+
+  const canLoad = user?.role === "admin" || user?.role === "master"
+
+  React.useEffect(() => {
+    if (authLoading || !canLoad) return
+    void loadOverview()
+  }, [authLoading, canLoad, loadOverview])
+
+  React.useEffect(() => {
+    if (authLoading || !canLoad) return
+    void loadUsers()
+  }, [authLoading, canLoad, loadUsers])
 
   React.useEffect(() => {
     if (!selectedId) {
@@ -353,6 +367,8 @@ export function AdminPage() {
         )
       }
       toast.success("Usuário atualizado.")
+      // KPIs de ativos/desativados vêm do overview — ressincroniza sem piscar.
+      void loadOverview()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Falha ao atualizar.")
     } finally {
@@ -368,7 +384,9 @@ export function AdminPage() {
     )
   }
 
-  if (!isStaff && !loading) {
+  // Guard antes de qualquer render: evita o flash da página e o GET 403 do painel
+  // de modelos pra quem não é staff.
+  if (user?.role !== "admin" && user?.role !== "master") {
     return <Navigate to="/" replace />
   }
 
@@ -405,7 +423,7 @@ export function AdminPage() {
       <Tabs
         value={adminTab}
         onValueChange={(v) =>
-          setAdminTab(v as "analytics" | "models" | "users")
+          setAdminTab(v as "analytics" | "models" | "kb" | "users")
         }
         className="mt-6 gap-4"
       >
@@ -416,6 +434,9 @@ export function AdminPage() {
           <TabsTrigger value="models" className="flex-none">
             Modelos
           </TabsTrigger>
+          <TabsTrigger value="kb" className="flex-none">
+            Conhecimento
+          </TabsTrigger>
           <TabsTrigger value="users" className="flex-none">
             Usuários
           </TabsTrigger>
@@ -425,27 +446,31 @@ export function AdminPage() {
           <AdminModelsPanel />
         </TabsContent>
 
+        <TabsContent value="kb" className="mt-0">
+          <AdminKbPanel />
+        </TabsContent>
+
         <TabsContent value="analytics" className="mt-0">
-      {loading ? (
+      {overviewLoading && !overview ? (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {Array.from({ length: 8 }).map((_, i) => (
             <Skeleton key={i} className="h-24 w-full" />
           ))}
         </div>
-      ) : error ? (
+      ) : overviewError ? (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm">
-          <p className="text-destructive">{error}</p>
+          <p className="text-destructive">{overviewError}</p>
           <Button
             variant="outline"
             size="sm"
             className="mt-3"
-            onClick={() => void load()}
+            onClick={() => void loadOverview()}
           >
             Tentar de novo
           </Button>
         </div>
       ) : (
-        <>
+        <div className={cn(overviewLoading && "opacity-60 transition-opacity")}>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Kpi
               label="Usuários ativos"
@@ -561,7 +586,7 @@ export function AdminPage() {
               ) : null}
             </div>
           </section>
-        </>
+        </div>
       )}
         </TabsContent>
 
@@ -598,13 +623,42 @@ export function AdminPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visible.length === 0 ? (
+                  {usersLoading ? (
+                    Array.from({ length: 6 }).map((_, i) => (
+                      <tr
+                        key={i}
+                        className="border-b border-border/70 last:border-0"
+                      >
+                        <td colSpan={6} className="px-4 py-1.5">
+                          <Skeleton className="h-11 w-full" />
+                        </td>
+                      </tr>
+                    ))
+                  ) : usersError ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-4">
+                        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm">
+                          <p className="text-destructive">{usersError}</p>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="mt-3"
+                            onClick={() => void loadUsers()}
+                          >
+                            Tentar de novo
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : visible.length === 0 ? (
                     <tr>
                       <td
                         colSpan={6}
                         className="px-4 py-8 text-center text-muted-foreground"
                       >
-                        Nenhum usuário encontrado.
+                        {query.trim()
+                          ? `Nenhum usuário para “${query.trim()}”.`
+                          : "Nenhum usuário cadastrado."}
                       </td>
                     </tr>
                   ) : (
@@ -618,9 +672,13 @@ export function AdminPage() {
                         >
                           <td className="px-4 py-2.5">
                             <div className="min-w-0">
-                              <p className="truncate font-medium">
-                                {u.full_name || "Sem nome"}
-                              </p>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedId(u.id)}
+                                className="max-w-full truncate rounded text-left font-medium hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                              >
+                                {u.full_name || u.email || "Sem nome"}
+                              </button>
                               <p className="truncate text-xs text-muted-foreground">
                                 {u.email || u.id}
                               </p>
@@ -818,16 +876,27 @@ export function AdminPage() {
                       <>
                         {actorRole === "master" ? (
                           <div>
-                            <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                            <label
+                              htmlFor="admin-user-role"
+                              className="mb-1.5 block text-xs font-medium text-muted-foreground"
+                            >
                               Papel
                             </label>
                             <select
+                              id="admin-user-role"
+                              aria-label={`Papel de ${detail.profile.email ?? detail.profile.id}`}
                               className="h-9 rounded-md border border-border bg-background px-2 text-sm"
                               value={detail.profile.role}
                               disabled={busyId === detail.profile.id}
                               onChange={(e) => {
                                 const role = e.target.value as DexterRole
                                 if (role === detail.profile.role) return
+                                const who =
+                                  detail.profile.email ?? detail.profile.id
+                                const ok = window.confirm(
+                                  `Tornar ${who} ${roleLabel(role)}?`,
+                                )
+                                if (!ok) return
                                 void applyPatch(detail.profile.id, { role })
                               }}
                             >
@@ -844,11 +913,19 @@ export function AdminPage() {
                           }
                           disabled={busyId === detail.profile.id}
                           className="gap-1.5"
-                          onClick={() =>
+                          onClick={() => {
+                            const who =
+                              detail.profile.email ?? detail.profile.id
+                            const ok = window.confirm(
+                              detail.profile.disabled_at
+                                ? `Reativar ${who}?`
+                                : `Desativar ${who}? A pessoa perde acesso imediatamente.`,
+                            )
+                            if (!ok) return
                             void applyPatch(detail.profile.id, {
                               disabled: !detail.profile.disabled_at,
                             })
-                          }
+                          }}
                         >
                           {busyId === detail.profile.id ? (
                             <Loader2 className="size-3.5 animate-spin" />

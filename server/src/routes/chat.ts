@@ -12,6 +12,7 @@ import type Anthropic from "@anthropic-ai/sdk"
 import { config } from "../config.js"
 import { streamChat, type LlmMessage } from "../llm/router.js"
 import { enabledModels, resolveModel } from "../llm/models.js"
+import { isErroSanitizado } from "../lib/erro-modelo.js"
 import { endSSE, initSSE, writeSSE, writeSSEHeartbeat } from "../lib/sse.js"
 import { DEXTER_SYSTEM_PROMPT } from "../llm/system-prompt.js"
 import { resolveUser } from "../services/auth.js"
@@ -22,6 +23,10 @@ import {
   upsertChat,
 } from "../services/chat-store.js"
 import { buildProjectPromptBlock } from "../services/project-store.js"
+import {
+  getKbPromptContext,
+  type KbPromptContext,
+} from "../services/kb-store.js"
 import {
   connectorsPromptBlock,
   resolveConnectorRuntime,
@@ -35,7 +40,7 @@ import {
 } from "../systems/artifacts-context.js"
 import { runAgentLoop, type ToolCallRecord } from "../systems/agent-loop.js"
 import { runOpenAiAgentLoop } from "../systems/openai-agent-loop.js"
-import { auditToolCall } from "../systems/audit.js"
+import { auditToolCalls } from "../systems/audit.js"
 import { isOpenAiCompatibleProvider } from "../lib/openai-compatible.js"
 import { persistChatImageUrl } from "../lib/chat-images.js"
 import { generateImageGemini, generateImageOpenAI } from "../lib/images.js"
@@ -96,6 +101,27 @@ const chatRequestSchema = z.object({
   context: chatContextSchema.optional(),
 })
 
+/** Bloco da base de conhecimento GoWork: docs `always_load` inteiros + índice
+ * do resto (que o modelo lê sob demanda com kb__buscar). Sem docs → null. */
+function formatKbBlock(kb: KbPromptContext | null): string | null {
+  if (!kb) return null
+  if (kb.alwaysDocs.length === 0 && kb.index.length === 0) return null
+
+  const parts: string[] = ["## Base de conhecimento GoWork"]
+  for (const doc of kb.alwaysDocs) {
+    parts.push(`### ${doc.title}\n${doc.content}`)
+  }
+  if (kb.index.length > 0) {
+    parts.push(
+      "Documentos adicionais (use a tool kb__buscar):\n" +
+        kb.index
+          .map((d) => `- ${d.slug} — ${d.title} (${d.category})`)
+          .join("\n"),
+    )
+  }
+  return parts.join("\n\n")
+}
+
 /** Monta o system prompt final: base + projeto + artefatos + mapa de acesso. */
 function buildSystemPrompt(
   context: z.infer<typeof chatContextSchema> | undefined,
@@ -103,6 +129,7 @@ function buildSystemPrompt(
   projectBlock: string | null,
   artifactsBlock: string | null,
   connectors?: ConnectorRuntime,
+  kbContext?: KbPromptContext | null,
 ): string {
   let prompt = DEXTER_SYSTEM_PROMPT
   if (context?.system) {
@@ -113,6 +140,10 @@ function buildSystemPrompt(
   }
   if (artifactsBlock) {
     prompt += `\n\n${artifactsBlock}`
+  }
+  const kbBlock = formatKbBlock(kbContext ?? null)
+  if (kbBlock) {
+    prompt += `\n\n${kbBlock}`
   }
   prompt +=
     "\n\n## Acesso deste usuário aos sistemas GoWork\n" +
@@ -165,6 +196,32 @@ function toAnthropicMessages(
     }
     return { role: m.role as "user" | "assistant", content }
   })
+}
+
+/** Mensagem de erro enviada ao cliente no evento SSE `error`: só faixas
+ * conhecidas. Detalhe interno (SQL/PostgREST, payload do provider) fica no
+ * log — nunca no stream.
+ *
+ * O agent loop Anthropic já traduz a falha do provider para português e marca
+ * o Error (`erroSanitizado`) — nesse caso a mensagem vai como está, senão as
+ * regex abaixo (em inglês, para a mensagem crua de OpenAI/Ollama) jogariam
+ * todo o caminho padrão no fallback genérico. */
+function mensagemErroCliente(err: unknown): string {
+  if (isErroSanitizado(err)) return err.message
+  const msg = err instanceof Error ? err.message : ""
+  if (/overloaded|529/i.test(msg)) {
+    return "O modelo está sobrecarregado agora. Tente novamente em instantes."
+  }
+  if (/rate.?limit|429|quota/i.test(msg)) {
+    return "Limite de requisições atingido. Aguarde um momento e tente novamente."
+  }
+  if (/timeout|timed out|ETIMEDOUT|AbortError/i.test(msg)) {
+    return "A chamada ao modelo demorou demais e foi interrompida."
+  }
+  if (/context.?length|too many tokens|maximum context/i.test(msg)) {
+    return "O contexto desta conversa ficou grande demais após as consultas. Tente novamente com um pedido mais focado."
+  }
+  return "Não consegui concluir esta resposta. Tente novamente."
 }
 
 export default async function chatRoutes(app: FastifyInstance): Promise<void> {
@@ -248,12 +305,22 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     const artifactsFromContext = (body.context?.artifacts ?? []) as ArtifactWire[]
     const artifactsBlock = formatArtifactsSystemBlock(artifactsFromContext)
 
+    // Base de conhecimento da empresa (cache de 60s no store). Falha aqui NÃO
+    // derruba o chat — segue sem o bloco, com o motivo no log.
+    let kbContext: KbPromptContext | null = null
+    try {
+      kbContext = await getKbPromptContext()
+    } catch (err) {
+      request.log.warn({ err }, "base de conhecimento indisponível neste run")
+    }
+
     const systemPrompt = buildSystemPrompt(
       body.context,
       access,
       projectBlock,
       artifactsBlock,
       connectors,
+      kbContext,
     )
 
     // Modelo escolhido na interface (context.model) — catálogo admin + default.
@@ -341,12 +408,96 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     let fullText = ""
     let endReason: string = "ok"
     let steps = 0
-    try {
-      let usedModel = modelInfo.model
-      let tokensIn: number | undefined
-      let tokensOut: number | undefined
-      const toolCalls: ToolCallRecord[] = []
+    let usedModel = modelInfo.model
+    let tokensIn: number | undefined
+    let tokensOut: number | undefined
+    const toolCalls: ToolCallRecord[] = []
 
+    let assistantMessageId: string | undefined
+    let persistido = false
+    let persistFalhou = false
+    /**
+     * Persiste a resposta do assistente — SEMPRE que houver texto, inclusive
+     * quando o usuário aperta Parar ou o provider falha no meio. Sem isso o
+     * texto aparecia na tela e sumia ao recarregar a conversa (e o par
+     * user/assistant ficava desbalanceado no próximo turno). Idempotente.
+     *
+     * Run sem texto mas com tool calls também grava (placeholder): é o
+     * message_id desta linha que liga os passos ao "Ver detalhes" — sem ela a
+     * auditoria fica órfã e invisível.
+     */
+    const persistirResposta = async (): Promise<void> => {
+      if (persistido) return
+      persistido = true
+      const texto = fullText.trim()
+      if (!texto && toolCalls.length === 0) return
+      const sufixo =
+        endReason === "aborted" ? "\n\n_(interrompido pelo usuário)_" : ""
+      const corpo =
+        texto || "_(sem resposta do modelo — veja os passos desta execução)_"
+      try {
+        assistantMessageId = await insertMessage({
+          chatId: body.threadId,
+          userId,
+          role: "assistant",
+          content: corpo + sufixo,
+          model: usedModel,
+          tokensIn,
+          tokensOut,
+          traceId: request.traceId,
+        })
+      } catch (err) {
+        // O front sincroniza a cauda depois do run: sem esta linha a resposta
+        // desaparece da tela. Sinaliza para o run terminar em `error`, não em
+        // `done` limpo.
+        persistFalhou = true
+        request.log.error(
+          { err, traceId: request.traceId, chatId: body.threadId, endReason },
+          "falha ao persistir a resposta do assistente",
+        )
+      }
+    }
+
+    let auditado = false
+    /**
+     * Auditoria LGPD das tool calls (best-effort) — UM único INSERT em lote,
+     * ANTES do `done`: o front refaz `GET /api/chats/:id/steps` ~250 ms depois
+     * de o run sair de `running` e aceita a primeira resposta, então gravar
+     * depois do stream deixaria o "Ver detalhes" da resposta nova vazio.
+     */
+    const gravarAuditoria = async (): Promise<void> => {
+      if (auditado) return
+      auditado = true
+      if (toolCalls.length === 0) return
+      if (!assistantMessageId) {
+        request.log.warn(
+          { traceId: request.traceId, chatId: body.threadId, endReason },
+          "auditoria sem message_id — os passos não aparecerão em Ver detalhes",
+        )
+      }
+      try {
+        await auditToolCalls(
+          toolCalls.map((tc) => ({
+            chatId: body.threadId,
+            userId,
+            messageId: assistantMessageId,
+            toolName: tc.toolName,
+            input: tc.input,
+            output: tc.ok ? tc.output : { error: tc.error },
+            status: tc.ok ? ("ok" as const) : ("error" as const),
+            durationMs: tc.durationMs,
+            traceId: request.traceId,
+          })),
+        )
+      } catch (err) {
+        request.log.warn(
+          { err, traceId: request.traceId, chatId: body.threadId },
+          "auditoria das tool calls falhou",
+        )
+      }
+    }
+
+    try {
       const onToolCallEmit = (rec: ToolCallRecord): void => {
         toolCalls.push(rec)
         emit({
@@ -527,33 +678,6 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         emit({ event: "text-delta", data: { textDelta: fullText } })
       }
 
-      const assistantMessageId = await insertMessage({
-        chatId: body.threadId,
-        userId,
-        role: "assistant",
-        content: fullText,
-        model: usedModel,
-        tokensIn,
-        tokensOut,
-        traceId: request.traceId,
-      })
-
-      // Auditoria LGPD de cada tool call (best-effort). O message_id liga os
-      // passos à resposta — é o que alimenta o "Ver detalhes" no histórico.
-      for (const tc of toolCalls) {
-        await auditToolCall({
-          chatId: body.threadId,
-          userId,
-          messageId: assistantMessageId,
-          toolName: tc.toolName,
-          input: tc.input,
-          output: tc.ok ? tc.output : { error: tc.error },
-          status: tc.ok ? "ok" : "error",
-          durationMs: tc.durationMs,
-          traceId: request.traceId,
-        })
-      }
-
       request.log.info(
         {
           traceId: request.traceId,
@@ -564,7 +688,19 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         },
         "chat run ended",
       )
-      emit({ event: "done", data: {} })
+      await persistirResposta()
+      await gravarAuditoria()
+      if (persistFalhou) {
+        emit({
+          event: "error",
+          data: {
+            message:
+              "Não consegui salvar esta resposta no histórico. Copie o texto antes de recarregar a conversa.",
+          },
+        })
+      } else {
+        emit({ event: "done", data: {} })
+      }
     } catch (err) {
       const aborted = controller.signal.aborted
       endReason = timedOut ? "timeout" : aborted ? "aborted" : "api_error"
@@ -572,9 +708,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         ? "Esta resposta demorou demais e foi interrompida. Toque em Tentar novamente."
         : aborted
           ? "Geração cancelada."
-          : err instanceof Error
-            ? err.message
-            : "erro desconhecido"
+          : mensagemErroCliente(err)
 
       request.log.error(
         {
@@ -587,6 +721,8 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         "erro no streaming do chat",
       )
 
+      await persistirResposta()
+      await gravarAuditoria()
       if (!aborted || timedOut) {
         emit({ event: "error", data: { message } })
       }
@@ -603,5 +739,10 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         }
       }
     }
+
+    // Rede de segurança: se por algum caminho a resposta/auditoria não foi
+    // gravada (ambas idempotentes).
+    await persistirResposta()
+    await gravarAuditoria()
   })
 }

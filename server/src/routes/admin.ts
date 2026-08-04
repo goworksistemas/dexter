@@ -18,6 +18,13 @@ import {
   upsertModelOverride,
 } from "../services/model-store.js"
 import {
+  createKbDoc,
+  deleteKbDoc,
+  listKbDocs,
+  updateKbDoc,
+  KB_CATEGORIES,
+} from "../services/kb-store.js"
+import {
   invalidateModelProbeCache,
   listAllDiscoveredModels,
   providerStatus,
@@ -36,12 +43,49 @@ const patchSchema = z
 const daysSchema = z.coerce.number().int().min(1).max(365).default(30)
 
 const modelPatchSchema = z
-  .object({
+  .strictObject({
     enabled: z.boolean().optional(),
     is_default: z.boolean().optional(),
     label: z.string().min(1).max(120).nullable().optional(),
     description: z.string().max(2000).nullable().optional(),
     sort_order: z.number().int().min(0).max(10_000).nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, {
+    message: "Informe ao menos um campo.",
+  })
+
+/** Base de conhecimento: mesmo domínio dos checks da migration 0020. */
+const kbSlugSchema = z
+  .string()
+  .trim()
+  .regex(
+    /^[a-z0-9][a-z0-9-]{1,80}$/,
+    "Slug inválido: 2 a 81 caracteres, só minúsculas, números e hífen.",
+  )
+const kbTitleSchema = z.string().trim().min(1).max(160)
+const kbContentSchema = z.string().max(60_000)
+const kbCategorySchema = z.enum(KB_CATEGORIES)
+const kbSortSchema = z.number().int().min(0).max(10_000)
+
+const kbCreateSchema = z.strictObject({
+  slug: kbSlugSchema.optional(),
+  title: kbTitleSchema,
+  category: kbCategorySchema,
+  content: kbContentSchema,
+  enabled: z.boolean().optional(),
+  always_load: z.boolean().optional(),
+  sort: kbSortSchema.optional(),
+})
+
+const kbPatchSchema = z
+  .strictObject({
+    slug: kbSlugSchema.optional(),
+    title: kbTitleSchema.optional(),
+    category: kbCategorySchema.optional(),
+    content: kbContentSchema.optional(),
+    enabled: z.boolean().optional(),
+    always_load: z.boolean().optional(),
+    sort: kbSortSchema.optional(),
   })
   .refine((v) => Object.keys(v).length > 0, {
     message: "Informe ao menos um campo.",
@@ -180,6 +224,41 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       }
     },
   )
+
+  // Base de conhecimento GoWork (contexto curado do Dexter).
+  app.get("/api/admin/kb", async (req) => {
+    const user = await resolveUser(req)
+    const actor = await loadActorProfile(user.userId, user.email)
+    await assertStaff(actor)
+    const docs = await listKbDocs()
+    return { docs, actorRole: actor.role as DexterRole }
+  })
+
+  app.post("/api/admin/kb", async (req) => {
+    const user = await resolveUser(req)
+    const actor = await loadActorProfile(user.userId, user.email)
+    await assertStaff(actor)
+    const body = kbCreateSchema.parse(req.body)
+    const doc = await createKbDoc(body, actor.id)
+    return { doc }
+  })
+
+  app.patch<{ Params: { id: string } }>("/api/admin/kb/:id", async (req) => {
+    const user = await resolveUser(req)
+    const actor = await loadActorProfile(user.userId, user.email)
+    await assertStaff(actor)
+    const body = kbPatchSchema.parse(req.body)
+    const doc = await updateKbDoc(req.params.id, body, actor.id)
+    return { doc }
+  })
+
+  app.delete<{ Params: { id: string } }>("/api/admin/kb/:id", async (req) => {
+    const user = await resolveUser(req)
+    const actor = await loadActorProfile(user.userId, user.email)
+    await assertStaff(actor)
+    await deleteKbDoc(req.params.id)
+    return { ok: true }
+  })
 }
 
 export default adminRoutes
