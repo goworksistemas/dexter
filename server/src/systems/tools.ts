@@ -28,8 +28,16 @@ import {
   isWebToolName,
 } from "./web-search.js"
 import { KB_CATEGORIES, searchKbDocs } from "../services/kb-store.js"
+import {
+  buildMultiAgentTools,
+  describeMultiAgentTool,
+  isMultiAgentToolName,
+  MULTI_AGENT_TOOL,
+  runSubAgent,
+} from "./multi-agent.js"
 
 export type { AnthropicTool } from "./tool-types.js"
+export { MULTI_AGENT_TOOL, isMultiAgentToolName }
 
 /** nome da tool = `<slug>__<fn>` (o modelo vê isto; o backend traduz de volta). */
 function toolName(slug: string, fn: string): string {
@@ -150,6 +158,8 @@ export interface BuildToolsOptions {
   access: SystemAccess[]
   connectors?: ConnectorRuntime
   userId?: string
+  /** Usuário autorizou multi-agentes nas preferências. */
+  multiAgentEnabled?: boolean
 }
 
 /** Monta a lista de tools do Claude (sistemas GoWork + conectores ativos). */
@@ -157,15 +167,12 @@ export async function buildTools(
   accessOrOpts: SystemAccess[] | BuildToolsOptions,
   connectors?: ConnectorRuntime,
 ): Promise<AnthropicTool[]> {
-  const access = Array.isArray(accessOrOpts)
-    ? accessOrOpts
-    : accessOrOpts.access
-  const runtime = Array.isArray(accessOrOpts)
-    ? connectors
-    : accessOrOpts.connectors
-  const userId = Array.isArray(accessOrOpts)
-    ? undefined
-    : accessOrOpts.userId
+  const opts: BuildToolsOptions = Array.isArray(accessOrOpts)
+    ? { access: accessOrOpts, connectors }
+    : accessOrOpts
+  const access = opts.access
+  const runtime = opts.connectors
+  const userId = opts.userId
 
   const tools: AnthropicTool[] = []
   for (const a of access) {
@@ -192,6 +199,9 @@ export async function buildTools(
   }
   tools.push(...(await buildWebTools()))
   tools.push(...buildKbTools())
+  if (opts.multiAgentEnabled) {
+    tools.push(...buildMultiAgentTools())
+  }
   return tools
 }
 
@@ -206,6 +216,9 @@ export interface ToolDescription {
 
 /** Traduz o nome técnico da tool em rótulos legíveis (para o progresso na UI). */
 export function describeTool(name: string): ToolDescription {
+  if (isMultiAgentToolName(name)) {
+    return describeMultiAgentTool(name)
+  }
   if (isWebToolName(name)) {
     return describeWebTool(name)
   }
@@ -249,8 +262,54 @@ export async function executeTool(
     connectors?: ConnectorRuntime
     /** Cancelamento do run (cliente desconectou / Parar). */
     signal?: AbortSignal
+    multiAgentEnabled?: boolean
+    model?: string
+    apiKey?: string
+    onProgress?: (evt: import("./progress.js").AgentProgressEvent) => void
   },
 ): Promise<ToolExecution> {
+  if (isMultiAgentToolName(name)) {
+    if (!ctx.multiAgentEnabled) {
+      return {
+        ok: false,
+        slug: "dexter",
+        fn: "spawn_subagent",
+        error:
+          "Multi-agentes não habilitado. Ative em Configurações → Multi-agentes.",
+      }
+    }
+    const sub = await runSubAgent({
+      objetivo: String(input.objetivo ?? ""),
+      contexto:
+        input.contexto != null ? String(input.contexto) : undefined,
+      model: ctx.model ?? "claude-sonnet-5",
+      access: ctx.access,
+      connectors: ctx.connectors,
+      userId: ctx.userId,
+      email: ctx.email,
+      apiKey: ctx.apiKey,
+      signal: ctx.signal,
+      onProgress: ctx.onProgress,
+    })
+    if (!sub.ok) {
+      return {
+        ok: false,
+        slug: "dexter",
+        fn: "spawn_subagent",
+        error: sub.error ?? "sub-agente falhou",
+        result: sub.text || undefined,
+      }
+    }
+    return {
+      ok: true,
+      slug: "dexter",
+      fn: "spawn_subagent",
+      result: {
+        relatorio: sub.text,
+        passos_tools: sub.steps,
+      },
+    }
+  }
   if (isWebToolName(name)) {
     return executeWebTool(name, input, ctx.signal)
   }

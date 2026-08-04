@@ -19,6 +19,7 @@ import modelsRoutes from "./routes/models.js"
 import projectsRoutes from "./routes/projects.js"
 import transcribeRoutes from "./routes/transcribe.js"
 import userKeysRoutes from "./routes/user-keys.js"
+import shareRoutes from "./routes/share.js"
 import workflowsRoutes from "./routes/workflows.js"
 import { AuthError, ForbiddenError, NotFoundError } from "./services/auth.js"
 import {
@@ -100,6 +101,7 @@ app.get("/healthz", async () => ({ status: "ok" }))
 
 await app.register(chatRoutes)
 await app.register(chatsRoutes)
+await app.register(shareRoutes)
 await app.register(projectsRoutes)
 await app.register(connectionsRoutes)
 await app.register(connectorsRoutes)

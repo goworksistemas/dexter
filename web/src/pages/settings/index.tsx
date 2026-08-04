@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { Link, useNavigate } from "react-router-dom"
-import { ArrowLeft, KeyRound, LogOut, Monitor, Moon, Sun, Trash2 } from "lucide-react"
+import { ArrowLeft, KeyRound, LogOut, Monitor, Moon, Sun, Trash2, Users } from "lucide-react"
 import { toast } from "sonner"
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import {
   updatePassword,
   updateProfileName,
+  updateProfilePreferences,
   updateProfileTheme,
 } from "@/lib/supabase"
 import {
@@ -279,6 +280,10 @@ export function SettingsPage() {
 
         <Separator />
 
+        <MultiAgentSection />
+
+        <Separator />
+
         <ApiKeysSection />
 
         <Separator />
@@ -296,6 +301,111 @@ export function SettingsPage() {
         </section>
       </div>
     </div>
+  )
+}
+
+function formatDayMonth(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return "—"
+  return date.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
+}
+
+function MultiAgentSection() {
+  const { user, refreshProfile } = useAuth()
+  const ma = user?.preferences?.multiAgent
+  const enabled = ma?.enabled === true && !!ma.authorizedAt
+  const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+
+  const apply = async (next: boolean) => {
+    setBusy(true)
+    try {
+      if (next) {
+        await updateProfilePreferences({
+          multiAgent: {
+            enabled: true,
+            authorizedAt: new Date().toISOString(),
+          },
+        })
+        toast.success("Multi-agentes habilitado nesta conta.")
+      } else {
+        await updateProfilePreferences({
+          multiAgent: { enabled: false },
+        })
+        toast.success("Multi-agentes desligado.")
+      }
+      await refreshProfile()
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Falha ao salvar preferência.",
+      )
+    } finally {
+      setBusy(false)
+      setConfirming(false)
+    }
+  }
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Users className="size-4 text-muted-foreground" />
+        <h2 className="text-sm font-medium text-foreground">Multi-agentes</h2>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Quando habilitado, o Dexter pode delegar subtarefas independentes a
+        sub-agentes (mesmas permissões da sua conta). Você vê cada delegação na
+        timeline da resposta. Máximo de 3 sub-agentes por mensagem.
+      </p>
+      {enabled && ma?.authorizedAt && (
+        <p className="text-xs text-muted-foreground">
+          Autorizado em {formatDayMonth(ma.authorizedAt)}
+        </p>
+      )}
+      {confirming ? (
+        <div className="space-y-2 rounded-lg border border-primary/30 bg-primary/5 p-3">
+          <p className="text-sm text-foreground">
+            Autorizo o Dexter a spawnar sub-agentes com meu acesso para consultas
+            paralelas. Cada sub-agente consome tokens adicionais.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              disabled={busy}
+              onClick={() => void apply(true)}
+            >
+              {busy ? "Salvando…" : "Confirmar e habilitar"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => setConfirming(false)}
+            >
+              Cancelar
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <Button
+          type="button"
+          size="sm"
+          variant={enabled ? "default" : "outline"}
+          disabled={busy}
+          onClick={() => {
+            if (enabled) void apply(false)
+            else setConfirming(true)
+          }}
+        >
+          {busy
+            ? "Salvando…"
+            : enabled
+              ? "Desabilitar multi-agentes"
+              : "Habilitar multi-agentes"}
+        </Button>
+      )}
+    </section>
   )
 }
 

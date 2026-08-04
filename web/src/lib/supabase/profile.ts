@@ -15,6 +15,7 @@ function parsePreferences(raw: unknown): UserPreferences {
     theme?: unknown
     sidebarCollapsed?: unknown
     connectors?: unknown
+    multiAgent?: unknown
   }
   const prefs: UserPreferences = {}
   if (obj.theme === "light" || obj.theme === "dark" || obj.theme === "system") {
@@ -29,6 +30,27 @@ function parsePreferences(raw: unknown): UserPreferences {
     if (typeof c.notion === "boolean") connectors.notion = c.notion
     if (typeof c.outlook === "boolean") connectors.outlook = c.outlook
     if (Object.keys(connectors).length > 0) prefs.connectors = connectors
+  }
+  if (obj.multiAgent && typeof obj.multiAgent === "object") {
+    const ma = obj.multiAgent as { enabled?: unknown; authorizedAt?: unknown }
+    if (ma.enabled === true) {
+      prefs.multiAgent = {
+        enabled: true,
+        ...(typeof ma.authorizedAt === "string"
+          ? { authorizedAt: ma.authorizedAt }
+          : {}),
+      }
+    }
+  } else if (obj.multi_agent && typeof obj.multi_agent === "object") {
+    const ma = obj.multi_agent as { enabled?: unknown; authorized_at?: unknown }
+    if (ma.enabled === true) {
+      prefs.multiAgent = {
+        enabled: true,
+        ...(typeof ma.authorized_at === "string"
+          ? { authorizedAt: ma.authorized_at }
+          : {}),
+      }
+    }
   }
   return prefs
 }
@@ -148,11 +170,33 @@ export async function updateProfilePreferences(
       patch.connectors || prev.connectors
         ? { ...prev.connectors, ...patch.connectors }
         : undefined,
+    multiAgent:
+      patch.multiAgent !== undefined ? patch.multiAgent : prev.multiAgent,
+  }
+
+  const prevRaw =
+    current?.preferences && typeof current.preferences === "object"
+      ? (current.preferences as Record<string, unknown>)
+      : {}
+
+  const dbPrefs: Record<string, unknown> = {
+    ...prevRaw,
+    theme: next.theme,
+    sidebarCollapsed: next.sidebarCollapsed,
+    connectors: next.connectors,
+  }
+  if (next.multiAgent?.enabled) {
+    dbPrefs.multi_agent = {
+      enabled: true,
+      authorized_at: next.multiAgent.authorizedAt ?? new Date().toISOString(),
+    }
+  } else {
+    delete dbPrefs.multi_agent
   }
 
   const { error } = await supabase
     .from("profiles")
-    .update({ preferences: next })
+    .update({ preferences: dbPrefs })
     .eq("id", userId)
 
   if (error) throw new Error(error.message)

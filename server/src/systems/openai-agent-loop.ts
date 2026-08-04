@@ -25,6 +25,10 @@ import {
   describeTool,
   executeTool,
 } from "./tools.js"
+import {
+  isMultiAgentToolName,
+  MULTI_AGENT_MAX_SPAWNS_PER_RUN,
+} from "./multi-agent.js"
 import type {
   AgentLoopEndReason,
   AgentLoopResult,
@@ -56,6 +60,7 @@ export interface OpenAiAgentLoopOptions {
   maxSteps?: number
   /** Chave a usar (BYOK/global). Sem ela, resolve a global (banco → env). */
   apiKey?: string
+  multiAgentEnabled?: boolean
 }
 
 function truncarToolResult(raw: string, max: number): string {
@@ -87,6 +92,7 @@ export async function runOpenAiAgentLoop(
     access: opts.access,
     connectors: opts.connectors,
     userId: opts.userId,
+    multiAgentEnabled: opts.multiAgentEnabled,
   })
   const maxTokens = await responseMaxTokensFor(opts.model)
 
@@ -120,6 +126,7 @@ export async function runOpenAiAgentLoop(
   let endReason: AgentLoopEndReason = "ok"
   let textoEmitido = ""
   const toolFailCounts = new Map<string, number>()
+  let spawnCount = 0
 
   const progress = (evt: AgentProgressEvent): void => {
     opts.onProgress?.(evt)
@@ -256,13 +263,28 @@ export async function runOpenAiAgentLoop(
               `Anti-loop: ${tc.function.name} com os mesmos args já falhou/vazio ${falhasPrevias}x. ` +
               "Pare e reporte o erro técnico; não refetch o mesmo id.",
           }
+        } else if (
+          isMultiAgentToolName(tc.function.name) &&
+          spawnCount >= MULTI_AGENT_MAX_SPAWNS_PER_RUN
+        ) {
+          exec = {
+            ok: false,
+            slug: "dexter",
+            fn: "spawn_subagent",
+            error: `Limite de ${MULTI_AGENT_MAX_SPAWNS_PER_RUN} sub-agentes por resposta.`,
+          }
         } else {
+          if (isMultiAgentToolName(tc.function.name)) spawnCount += 1
           exec = await executeTool(tc.function.name, args, {
             userId: opts.userId,
             email: opts.email,
             access: opts.access,
             connectors: opts.connectors,
             signal: opts.signal,
+            multiAgentEnabled: opts.multiAgentEnabled,
+            model: opts.model,
+            apiKey: opts.apiKey,
+            onProgress: progress,
           })
           const vazio =
             exec.ok &&

@@ -65,6 +65,14 @@ const ArtifactViewerPage = React.lazy(() =>
     default: m.ArtifactViewerPage,
   })),
 )
+const ShareChatPage = React.lazy(() =>
+  import("@/pages/public/share-chat").then((m) => ({ default: m.ShareChatPage })),
+)
+const ShareArtifactPage = React.lazy(() =>
+  import("@/pages/public/share-artifact").then((m) => ({
+    default: m.ShareArtifactPage,
+  })),
+)
 
 /** Fallback de tela cheia (páginas fora do AppShell). */
 function FullPageFallback() {
@@ -181,6 +189,9 @@ function App() {
 
         <Route path="/update-password" element={<UpdatePasswordPage />} />
         <Route path="/auth/callback" element={<AuthCallbackPage />} />
+
+        <Route path="/s/c/:token" element={<ShareChatPage />} />
+        <Route path="/s/a/:token" element={<ShareArtifactPage />} />
 
         <Route element={<ProtectedRoute />}>
           {/* Aba dedicada fullscreen — fora do AppShell (sem sidebar). */}

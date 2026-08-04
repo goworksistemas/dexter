@@ -8,6 +8,7 @@ import { Link, useParams } from "react-router-dom"
 
 import { HtmlPreview } from "@/components/artifacts/html-preview"
 import { Markdown } from "@/components/chat/markdown"
+import { ShareLinkButton } from "@/components/share/share-link-dialog"
 import { Button } from "@/components/ui/button"
 import { useArtifactLive } from "@/lib/artifacts/use-artifact-live"
 import { cn } from "@/lib/utils"
@@ -82,6 +83,14 @@ export function ArtifactViewerPage() {
             ) : null}
           </p>
         </div>
+        <ShareLinkButton
+          resource="artifact"
+          resourceId={artifact.id}
+          size="sm"
+          variant="outline"
+          className="h-8 shrink-0 gap-1.5"
+          label="Publicar"
+        />
         <Button asChild variant="ghost" size="sm" className="h-8 gap-1.5">
           <Link to="/artifacts">
             <ExternalLink className="size-3.5" />

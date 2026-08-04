@@ -27,6 +27,10 @@ import { responseMaxTokens } from "../llm/models.js"
 import type { ConnectorRuntime } from "../connectors/types.js"
 import { buildTools, describeTool, executeTool, type AnthropicTool } from "./tools.js"
 import {
+  isMultiAgentToolName,
+  MULTI_AGENT_MAX_SPAWNS_PER_RUN,
+} from "./multi-agent.js"
+import {
   resumirArgs,
   resumirResultado,
   truncar,
@@ -75,6 +79,8 @@ export interface AgentLoopOptions {
   maxSteps?: number
   /** Chave Anthropic a usar (BYOK/global). Sem ela, resolve a global. */
   apiKey?: string
+  /** Usuário autorizou multi-agentes (opt-in). */
+  multiAgentEnabled?: boolean
 }
 
 export interface AgentLoopResult {
@@ -305,6 +311,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     access: opts.access,
     connectors: opts.connectors,
     userId: opts.userId,
+    multiAgentEnabled: opts.multiAgentEnabled,
   })
   // Tool server-side da Anthropic: a busca roda na API deles (com citações),
   // não passa pelo executeTool local. Blocos vêm como server_tool_use.
@@ -335,6 +342,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   let endReason: AgentLoopEndReason = "ok"
   /** Conta falhas/vazios da mesma tool+args — corta loop Notion refetch. */
   const toolFailCounts = new Map<string, number>()
+  let spawnCount = 0
 
   const progress = (evt: AgentProgressEvent): void => opts.onProgress?.(evt)
   const status = (text: string): void => {
@@ -605,7 +613,18 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
               `Anti-loop: a tool ${tu.name} com os mesmos argumentos já falhou/voltou vazia ${falhasPrevias}x. ` +
               "NÃO refetch o mesmo id. Informe o erro técnico ao usuário (permissão Notion, data_source_id errado, ou schema indisponível) e pare.",
           }
+        } else if (
+          isMultiAgentToolName(tu.name) &&
+          spawnCount >= MULTI_AGENT_MAX_SPAWNS_PER_RUN
+        ) {
+          exec = {
+            ok: false,
+            slug: "dexter",
+            fn: "spawn_subagent",
+            error: `Limite de ${MULTI_AGENT_MAX_SPAWNS_PER_RUN} sub-agentes por resposta.`,
+          }
         } else {
+          if (isMultiAgentToolName(tu.name)) spawnCount += 1
           exec = await executeTool(
             tu.name,
             (tu.input ?? {}) as Record<string, unknown>,
@@ -615,6 +634,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
               access: opts.access,
               connectors: opts.connectors,
               signal: opts.signal,
+              multiAgentEnabled: opts.multiAgentEnabled,
+              model: opts.model,
+              apiKey: opts.apiKey,
+              onProgress: progress,
             },
           )
           if (!exec.ok || isToolResultVazio(exec.result)) {

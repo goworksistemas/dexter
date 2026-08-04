@@ -3,6 +3,7 @@ import { Menu, Monitor, Moon, Sun } from "lucide-react"
 import { Link, useLocation } from "react-router-dom"
 
 import { ChatHeaderTitle, ChatActionsOverlays } from "@/components/chat/chat-actions"
+import { ShareLinkButton } from "@/components/share/share-link-dialog"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -85,6 +86,11 @@ export function Header() {
       )
     : null
 
+  const onChatRoute =
+    pathname === "/" ||
+    pathname.startsWith("/c/") ||
+    /^\/p\/[^/]+(\/c\/[^/]+)?$/.test(pathname)
+
   return (
     <>
     <header className="flex h-14 shrink-0 items-center justify-between gap-2 px-3 sm:px-4">
@@ -150,6 +156,16 @@ export function Header() {
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
+        {activeChat && onChatRoute ? (
+          <ShareLinkButton
+            resource="chat"
+            resourceId={activeChat.id}
+            label="Compartilhar"
+            size="sm"
+            variant="ghost"
+            className="hidden h-8 gap-1.5 sm:inline-flex"
+          />
+        ) : null}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -190,6 +206,10 @@ export function Header() {
       moveDialog={chatActions.moveDialog}
       onMoveDialogOpenChange={(open) =>
         chatActions.setMoveDialog((prev) => ({ ...prev, open }))
+      }
+      shareDialog={chatActions.shareDialog}
+      onShareDialogOpenChange={(open) =>
+        chatActions.setShareDialog((prev) => ({ ...prev, open }))
       }
     />
     </>

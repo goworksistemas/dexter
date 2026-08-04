@@ -1,8 +1,9 @@
 import * as React from "react"
 import { createPortal } from "react-dom"
-import { ChevronDown, FolderInput, Pencil, Trash2 } from "lucide-react"
+import { ChevronDown, FolderInput, Pencil, Share2, Trash2 } from "lucide-react"
 
 import { MoveChatDialog } from "@/components/projects/move-chat-dialog"
+import { ShareLinkDialog } from "@/components/share/share-link-dialog"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,6 +17,7 @@ import type { ChatMenuState, MoveDialogState } from "@/lib/chats/use-chat-action
 export type ChatActionHandlers = {
   onRename: () => void
   onMove: () => void
+  onShare: () => void
   onDelete: () => void
 }
 
@@ -56,6 +58,7 @@ function useAnchoredPosition(x: number, y: number, w: number, h: number) {
 export function ChatActionDropdownItems({
   onRename,
   onMove,
+  onShare,
   onDelete,
 }: ChatActionHandlers) {
   return (
@@ -63,6 +66,10 @@ export function ChatActionDropdownItems({
       <DropdownMenuItem onSelect={onRename}>
         <Pencil className="size-4" />
         Renomear
+      </DropdownMenuItem>
+      <DropdownMenuItem onSelect={onShare}>
+        <Share2 className="size-4" />
+        Compartilhar…
       </DropdownMenuItem>
       <DropdownMenuItem onSelect={onMove}>
         <FolderInput className="size-4" />
@@ -82,6 +89,7 @@ export function ChatActionsContextMenu({
   onClose,
   onRename,
   onMove,
+  onShare,
   onDelete,
 }: {
   menu: ChatMenuState
@@ -110,6 +118,18 @@ export function ChatActionsContextMenu({
       >
         <Pencil className="size-4" />
         Renomear
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className={contextItemClass}
+        onClick={() => {
+          onShare()
+          onClose()
+        }}
+      >
+        <Share2 className="size-4" />
+        Compartilhar…
       </button>
       <button
         type="button"
@@ -227,12 +247,16 @@ export function ChatActionsOverlays({
   actionsForMenu,
   moveDialog,
   onMoveDialogOpenChange,
+  shareDialog,
+  onShareDialogOpenChange,
 }: {
   chatMenu: ChatMenuState | null
   onCloseChatMenu: () => void
   actionsForMenu: ChatActionHandlers | null
   moveDialog: MoveDialogState
   onMoveDialogOpenChange: (open: boolean) => void
+  shareDialog: { open: boolean; chatId: string | null }
+  onShareDialogOpenChange: (open: boolean) => void
 }) {
   return (
     <>
@@ -241,6 +265,14 @@ export function ChatActionsOverlays({
           menu={chatMenu}
           onClose={onCloseChatMenu}
           {...actionsForMenu}
+        />
+      ) : null}
+      {shareDialog.chatId ? (
+        <ShareLinkDialog
+          resource="chat"
+          resourceId={shareDialog.chatId}
+          open={shareDialog.open}
+          onOpenChange={onShareDialogOpenChange}
         />
       ) : null}
       <MoveChatDialog

@@ -34,6 +34,10 @@ export function useChatActions() {
   const [chatMenu, setChatMenu] = React.useState<ChatMenuState | null>(null)
   const [moveDialog, setMoveDialog] =
     React.useState<MoveDialogState>(EMPTY_MOVE)
+  const [shareDialog, setShareDialog] = React.useState<{
+    open: boolean
+    chatId: string | null
+  }>({ open: false, chatId: null })
   const renameInputRef = React.useRef<HTMLInputElement>(null)
 
   React.useEffect(() => {
@@ -107,13 +111,18 @@ export function useChatActions() {
 
   const closeChatMenu = React.useCallback(() => setChatMenu(null), [])
 
+  const openShareDialog = React.useCallback((chatId: string) => {
+    setShareDialog({ open: true, chatId })
+  }, [])
+
   const actionsForChat = React.useCallback(
     (chatId: string, title: string, projectId: string | null) => ({
       onRename: () => startRename(chatId, title),
       onMove: () => openMoveDialog(chatId, title, projectId),
+      onShare: () => openShareDialog(chatId),
       onDelete: () => void handleDeleteChat(chatId, title),
     }),
-    [handleDeleteChat, openMoveDialog, startRename],
+    [handleDeleteChat, openMoveDialog, openShareDialog, startRename],
   )
 
   return {
@@ -131,6 +140,9 @@ export function useChatActions() {
     handleDeleteChat,
     moveDialog,
     setMoveDialog,
+    shareDialog,
+    setShareDialog,
+    openShareDialog,
     actionsForChat,
   }
 }

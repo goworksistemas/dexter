@@ -20,12 +20,20 @@ export interface ConnectorPreferences {
   outlook?: boolean
 }
 
+export interface MultiAgentPreferences {
+  enabled: boolean
+  /** ISO8601 — autorização explícita do usuário. */
+  authorizedAt?: string
+}
+
 export interface UserPreferences {
   theme?: ThemePreference
   /** Sidebar desktop em modo compacto (só ícones). */
   sidebarCollapsed?: boolean
   /** Conectores externos (Notion / Outlook) ligados no AgentCore. */
   connectors?: ConnectorPreferences
+  /** Multi-agentes opt-in (delegação via sub-agentes). */
+  multiAgent?: MultiAgentPreferences
 }
 
 /** Papel do usuário no Dexter (tabela profiles.role). */

@@ -16,8 +16,12 @@ import { resolveModelForUser } from "../services/model-access.js"
 import { getEffectiveKey, isKeyProvider } from "../services/llm-keys.js"
 import { isErroSanitizado } from "../lib/erro-modelo.js"
 import { endSSE, initSSE, writeSSE, writeSSEHeartbeat } from "../lib/sse.js"
-import { DEXTER_SYSTEM_PROMPT } from "../llm/system-prompt.js"
+import { DEXTER_SYSTEM_PROMPT, MULTI_AGENT_PROMPT_BLOCK } from "../llm/system-prompt.js"
 import { resolveUser } from "../services/auth.js"
+import {
+  isMultiAgentAuthorized,
+  loadMultiAgentPreferences,
+} from "../services/multi-agent-prefs.js"
 import {
   getChat,
   getMessages,
@@ -132,8 +136,12 @@ function buildSystemPrompt(
   artifactsBlock: string | null,
   connectors?: ConnectorRuntime,
   kbContext?: KbPromptContext | null,
+  multiAgentEnabled?: boolean,
 ): string {
   let prompt = DEXTER_SYSTEM_PROMPT
+  if (multiAgentEnabled) {
+    prompt += `\n\n${MULTI_AGENT_PROMPT_BLOCK}`
+  }
   if (context?.system) {
     prompt += `\n\nContexto desta conversa: sistema alvo "${context.system}".`
   }
@@ -247,6 +255,8 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     // sistema. Vazio se não houver email ou nenhum sistema configurado.
     const access = email ? await resolveAccess(email) : []
     const connectors = await resolveConnectorRuntime(userId)
+    const multiAgentPrefs = await loadMultiAgentPreferences(userId)
+    const multiAgentEnabled = isMultiAgentAuthorized(multiAgentPrefs)
 
     // Se ainda não há mensagens no chat, é uma conversa nova — usa a 1ª
     // mensagem do usuário (truncada) como título.
@@ -323,6 +333,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       artifactsBlock,
       connectors,
       kbContext,
+      multiAgentEnabled,
     )
 
     // Modelo escolhido na interface (context.model) — catálogo admin + default,
@@ -625,6 +636,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
           email: email ?? "",
           apiKey: providerApiKey,
           signal: controller.signal,
+          multiAgentEnabled,
           onTextDelta: (t) => {
             fullText += t
             emit({ event: "text-delta", data: { textDelta: t } })
@@ -650,6 +662,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
           email: email ?? "",
           apiKey: providerApiKey,
           signal: controller.signal,
+          multiAgentEnabled,
           onTextDelta: (t) => {
             fullText += t
             emit({ event: "text-delta", data: { textDelta: t } })

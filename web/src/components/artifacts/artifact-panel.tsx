@@ -18,6 +18,7 @@ import {
   useArtifacts,
 } from "@/lib/artifacts"
 import { openArtifactTab, publishArtifactLive } from "@/lib/artifacts/live-channel"
+import { ShareLinkButton } from "@/components/share/share-link-dialog"
 import { cn } from "@/lib/utils"
 
 /**
@@ -415,6 +416,17 @@ export function ArtifactPanel() {
               <ExternalLink className="size-4 lg:size-3.5" />
               <span className="hidden sm:inline">Nova aba</span>
             </Button>
+            {activeId ? (
+              <ShareLinkButton
+                resource="artifact"
+                resourceId={activeId}
+                disabled={saving}
+                size="sm"
+                variant="ghost"
+                className="h-10 gap-1.5 rounded-lg lg:h-8"
+                label="Publicar"
+              />
+            ) : null}
             <Button
               type="button"
               size="sm"
