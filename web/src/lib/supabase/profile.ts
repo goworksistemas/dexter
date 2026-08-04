@@ -16,6 +16,7 @@ function parsePreferences(raw: unknown): UserPreferences {
     sidebarCollapsed?: unknown
     connectors?: unknown
     multiAgent?: unknown
+    multi_agent?: unknown
   }
   const prefs: UserPreferences = {}
   if (obj.theme === "light" || obj.theme === "dark" || obj.theme === "system") {

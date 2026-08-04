@@ -304,12 +304,6 @@ export function SettingsPage() {
   )
 }
 
-function formatDayMonth(iso: string): string {
-  const date = new Date(iso)
-  if (Number.isNaN(date.getTime())) return "—"
-  return date.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })
-}
-
 function MultiAgentSection() {
   const { user, refreshProfile } = useAuth()
   const ma = user?.preferences?.multiAgent
