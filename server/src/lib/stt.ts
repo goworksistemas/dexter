@@ -7,6 +7,13 @@ import { config } from "../config.js"
 
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
+/** Vocabulário do domínio — sem isso o modelo "corrige" nomes próprios
+ * (NetworkGo → network go, Dexter → dester, etc.). */
+const STT_PROMPT =
+  "Ditado em português brasileiro para o Dexter, assistente interno da GoWork. " +
+  "Termos comuns: GoWork, Dexter, NetworkGo, PipeGo, GoDash, MensureGo, CheckGo, " +
+  "SupplyGo, QRápido, Notion, Outlook, Supabase, chamado, ordem de serviço, OS."
+
 export class SttError extends Error {
   statusCode: number
 
@@ -78,6 +85,8 @@ export async function transcribeAudio(input: {
   form.append("model", config.STT_MODEL)
   form.append("language", input.language?.trim() || "pt")
   form.append("response_format", "json")
+  form.append("prompt", STT_PROMPT)
+  form.append("temperature", "0")
 
   const headers: Record<string, string> = {}
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`
