@@ -79,6 +79,7 @@ export async function resolveConnectorRuntime(
 export function connectorsPromptBlock(runtime: ConnectorRuntime): string {
   const lines: string[] = []
   let notionEnabled = false
+  let outlookEnabled = false
   for (const s of runtime.statuses) {
     if (!s.configured) continue
     if (!s.connected) {
@@ -89,6 +90,7 @@ export function connectorsPromptBlock(runtime: ConnectorRuntime): string {
     }
     if (s.enabled) {
       if (s.id === "notion") notionEnabled = true
+      if (s.id === "outlook") outlookEnabled = true
       lines.push(
         `- ${s.label} (slug: ${s.id}): HABILITADO — use as tools \`${s.id}__*\` (token OAuth deste usuário; Notion via MCP).`,
       )
@@ -99,6 +101,17 @@ export function connectorsPromptBlock(runtime: ConnectorRuntime): string {
     }
   }
   if (lines.length === 0) return ""
+
+
+  let outlookRules = ""
+  if (outlookEnabled) {
+    outlookRules =
+      "\n\n### Outlook (conector) — e-mail e agenda" +
+      "\n- Pode listar/ler/enviar e-mails, listar pastas, agenda, E também mover mensagens (`outlook__move_messages`) e marcar lido/não lido (`outlook__mark_messages_read`)." +
+      "\n- Pedidos do tipo 'mova para a pasta X' / 'marque como lido': execute as tools — NÃO diga que só tem leitura/envio." +
+      "\n- Pasta por nome: use `outlook__list_mail_folders` (ou passe o nome em destination_folder; a tool resolve)." +
+      "\n- Se erro mencionar Mail.ReadWrite / reconectar: peça ao usuário para reconectar o Outlook em Conexões uma vez (token antigo sem o scope)."
+  }
 
   let notionRules = ""
   if (notionEnabled) {
@@ -119,6 +132,7 @@ export function connectorsPromptBlock(runtime: ConnectorRuntime): string {
     lines.join("\n") +
     "\n- Só afirme o que as tools desses conectores retornarem.\n" +
     "- Se a tool falhar pedindo conexão, oriente o usuário a conectar Notion/Outlook em Conexões." +
-    notionRules
+    notionRules +
+    outlookRules
   )
 }

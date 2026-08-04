@@ -58,7 +58,7 @@ const OUTLOOK_SCOPES = [
   "openid",
   "profile",
   "User.Read",
-  "Mail.Read",
+  "Mail.ReadWrite",
   "Mail.Send",
   "Calendars.Read",
   "Calendars.ReadWrite",

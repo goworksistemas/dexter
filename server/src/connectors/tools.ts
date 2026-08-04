@@ -52,6 +52,8 @@ const REST_LABELS: Record<string, string> = {
   outlook__list_calendar_events: "Listar agenda",
   outlook__create_calendar_event: "Criar evento",
   outlook__list_mail_folders: "Pastas de e-mail",
+  outlook__move_messages: "Mover e-mails",
+  outlook__mark_messages_read: "Marcar lido/não lido",
 }
 
 /** Reforço nas descriptions do MCP Notion. */

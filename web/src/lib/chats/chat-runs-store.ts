@@ -18,6 +18,7 @@ import {
   progressoVazio,
   type RunProgress,
 } from "./run-steps"
+import { toast } from "sonner"
 
 export type ChatRunStatus = "running" | "complete" | "error" | "cancelled"
 
@@ -322,6 +323,16 @@ export class ChatRunsStore {
     if (!this.isCurrent(chatId, assistantMessageId)) return
     const prev = this.runs.get(chatId)
     if (!prev) return
+    if (
+      evento.type === "tool_call_end" &&
+      evento.status === "error" &&
+      typeof evento.summary === "string" &&
+      evento.summary.includes("Mail.ReadWrite")
+    ) {
+      toast.error(
+        "Reconecte o Outlook em Conexões (faltam permissões Mail.ReadWrite).",
+      )
+    }
     const progress = aplicarProgresso(prev.progress, evento)
     if (progress === prev.progress) return
     // Chegou evento real — limpa aviso de stall.
