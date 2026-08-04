@@ -13,7 +13,7 @@ function normalizeKind(lang: string): ArtifactKind {
   return "markdown"
 }
 
-/** Hash curto e estável (não criptográfico) para source_key. */
+/** Hash curto (fingerprint) — NÃO usar como identidade de upsert. */
 export function hashContent(input: string): string {
   let h = 2166136261
   for (let i = 0; i < input.length; i++) {
@@ -23,8 +23,17 @@ export function hashContent(input: string): string {
   return (h >>> 0).toString(16).padStart(8, "0")
 }
 
-export function sourceKeyFor(kind: ArtifactKind, content: string): string {
-  return `${kind}:${hashContent(content.trim())}`
+/**
+ * Identidade estável do artefato na conversa: um por kind.
+ * Assim "completar/editar" atualiza o mesmo registro (version++) em vez de criar outro.
+ */
+export function stableSourceKey(kind: ArtifactKind): string {
+  return `${kind}:current`
+}
+
+/** @deprecated Preferir stableSourceKey — mantido por compat com callers. */
+export function sourceKeyFor(kind: ArtifactKind, _content?: string): string {
+  return stableSourceKey(kind)
 }
 
 function titleFromContent(kind: ArtifactKind, content: string): string {
@@ -56,7 +65,7 @@ function buildBlock(
     language: language.toLowerCase(),
     content,
     blockIndex,
-    sourceKey: sourceKeyFor(kind, content),
+    sourceKey: stableSourceKey(kind),
     title: titleFromContent(kind, content),
     substantial: content.trim().length >= SUBSTANTIAL_CHARS,
     truncated,

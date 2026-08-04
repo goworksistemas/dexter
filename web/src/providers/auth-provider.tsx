@@ -9,6 +9,7 @@ import {
 } from "react"
 import type { Session } from "@supabase/supabase-js"
 
+import { isAllowedEmail } from "@/lib/auth/email-domain"
 import type { UserProfile } from "@/types"
 import {
   getSession,
@@ -42,6 +43,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const loadProfile = useCallback(
     async (next: Session | null) => {
       if (!next?.user) {
+        setUser(null)
+        return
+      }
+      if (!isAllowedEmail(next.user.email)) {
+        await supabaseSignOut().catch(() => undefined)
+        setSession(null)
         setUser(null)
         return
       }

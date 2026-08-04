@@ -1,5 +1,5 @@
 /**
- * Ponte entre o manifesto de RPCs e o tool-use do Claude.
+ * Ponte entre o manifesto de RPCs / conectores e o tool-use do Claude.
  *
  * SEGURANÇA (o ponto mais importante):
  *  - As tools expostas ao LLM NÃO têm `p_email`. O backend injeta o email do
@@ -7,21 +7,22 @@
  *  - Duplo gate: (1) o sistema tem que estar no mapa de acesso do usuário
  *    (preflight/whoami); (2) a função tem que estar no manifesto (allowlist).
  *    Além disso a própria RPC tem gate no banco (defesa em profundidade).
+ *  - Conectores Notion/Outlook: gated por preferência do usuário + secrets Infisical.
  */
+import {
+  buildConnectorTools,
+  describeConnectorTool,
+  executeConnectorTool,
+  isConnectorToolName,
+} from "../connectors/tools.js"
+import type { ConnectorRuntime } from "../connectors/types.js"
 import { SYSTEM_TOOLS } from "./manifest.js"
 import { callSystemRpc } from "./client.js"
 import { SYSTEMS } from "./registry.js"
 import { canAccess, type SystemAccess } from "./access.js"
+import type { AnthropicTool } from "./tool-types.js"
 
-export interface AnthropicTool {
-  name: string
-  description: string
-  input_schema: {
-    type: "object"
-    properties: Record<string, { type: string; description: string }>
-    required?: string[]
-  }
-}
+export type { AnthropicTool } from "./tool-types.js"
 
 /** nome da tool = `<slug>__<fn>` (o modelo vê isto; o backend traduz de volta). */
 function toolName(slug: string, fn: string): string {
@@ -34,12 +35,32 @@ function parseToolName(name: string): { slug: string; fn: string } | null {
   return { slug: name.slice(0, i), fn: name.slice(i + 2) }
 }
 
-/** Monta a lista de tools do Claude só para os sistemas que o usuário acessa. */
-export function buildTools(access: SystemAccess[]): AnthropicTool[] {
+export interface BuildToolsOptions {
+  access: SystemAccess[]
+  connectors?: ConnectorRuntime
+  userId?: string
+}
+
+/** Monta a lista de tools do Claude (sistemas GoWork + conectores ativos). */
+export async function buildTools(
+  accessOrOpts: SystemAccess[] | BuildToolsOptions,
+  connectors?: ConnectorRuntime,
+): Promise<AnthropicTool[]> {
+  const access = Array.isArray(accessOrOpts)
+    ? accessOrOpts
+    : accessOrOpts.access
+  const runtime = Array.isArray(accessOrOpts)
+    ? connectors
+    : accessOrOpts.connectors
+  const userId = Array.isArray(accessOrOpts)
+    ? undefined
+    : accessOrOpts.userId
+
   const tools: AnthropicTool[] = []
   for (const a of access) {
     for (const t of SYSTEM_TOOLS[a.slug] ?? []) {
-      const properties: Record<string, { type: string; description: string }> = {}
+      const properties: Record<string, { type: string; description: string }> =
+        {}
       for (const p of t.params) {
         properties[p.name] = { type: p.type, description: p.description }
       }
@@ -53,6 +74,10 @@ export function buildTools(access: SystemAccess[]): AnthropicTool[] {
         },
       })
     }
+  }
+
+  if (runtime) {
+    tools.push(...(await buildConnectorTools(runtime, { userId })))
   }
   return tools
 }
@@ -68,6 +93,9 @@ export interface ToolDescription {
 
 /** Traduz o nome técnico da tool em rótulos legíveis (para o progresso na UI). */
 export function describeTool(name: string): ToolDescription {
+  if (isConnectorToolName(name)) {
+    return describeConnectorTool(name)
+  }
   const parsed = parseToolName(name)
   if (!parsed) return { label: name }
   const { slug, fn } = parsed
@@ -91,27 +119,40 @@ export interface ToolExecution {
   error?: string
 }
 
-/** Executa uma tool call do Claude: gate de acesso + injeta p_email + chama a RPC. */
+/** Executa uma tool call: sistemas GoWork ou conectores Notion/Outlook. */
 export async function executeTool(
   name: string,
   input: Record<string, unknown>,
-  ctx: { email: string; access: SystemAccess[] }
+  ctx: {
+    userId: string
+    email: string
+    access: SystemAccess[]
+    connectors?: ConnectorRuntime
+  },
 ): Promise<ToolExecution> {
+  if (isConnectorToolName(name)) {
+    if (!ctx.connectors) {
+      return { ok: false, error: "conectores não resolvidos nesta sessão" }
+    }
+    return executeConnectorTool(name, input, {
+      userId: ctx.userId,
+      email: ctx.email,
+      runtime: ctx.connectors,
+    })
+  }
+
   const parsed = parseToolName(name)
   if (!parsed) return { ok: false, error: `tool desconhecida: ${name}` }
   const { slug, fn } = parsed
 
-  // Gate 1: o usuário precisa ter acesso ao sistema (preflight/whoami).
   if (!canAccess(ctx.access, slug)) {
     return { ok: false, slug, fn, error: `usuário sem acesso ao sistema "${slug}"` }
   }
-  // Gate 2: a função precisa estar no manifesto (allowlist).
   const allowed = (SYSTEM_TOOLS[slug] ?? []).some((t) => t.fn === fn)
   if (!allowed) {
     return { ok: false, slug, fn, error: `função não permitida: ${fn}` }
   }
 
-  // Injeta o email do usuário autenticado — o LLM NUNCA controla isto.
   const args = { ...input, p_email: ctx.email }
   try {
     const result = await callSystemRpc(slug, fn, args)

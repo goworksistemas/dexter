@@ -1,5 +1,4 @@
 import * as React from "react"
-import { Brain } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
@@ -8,18 +7,18 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 
-/** Marca do Dexter (quadrado com gradiente da paleta). */
+/** Marca do Dexter — mascote oficial. */
 export function DexterMark({ className }: { className?: string }) {
   return (
-    <span
+    <img
+      src="/dexter.png"
+      alt=""
       aria-hidden
       className={cn(
-        "shadow-elevate-sm flex size-8 shrink-0 items-center justify-center rounded-xl bg-[linear-gradient(140deg,var(--primary),color-mix(in_srgb,var(--secondary)_60%,var(--primary)))] text-white",
+        "size-8 shrink-0 rounded-xl object-cover object-top",
         className,
       )}
-    >
-      <Brain className="size-4" strokeWidth={2.4} />
-    </span>
+    />
   )
 }
 

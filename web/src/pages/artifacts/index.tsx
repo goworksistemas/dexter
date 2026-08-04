@@ -1,11 +1,15 @@
 import * as React from "react"
-import { Blocks, Code2, FileText, Search } from "lucide-react"
+import { Blocks, Code2, ExternalLink, FileText, MessageSquare, Search } from "lucide-react"
 
 import { PageHeading, PageShell } from "@/components/layout/page-shell"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
-import { fetchArtifactsForUser, type AgentArtifact } from "@/lib/artifacts"
+import {
+  fetchArtifactsForUser,
+  openArtifactTab,
+  type AgentArtifact,
+} from "@/lib/artifacts"
 import { useChats } from "@/lib/chats"
 import { formatRelative } from "@/lib/dates"
 
@@ -115,13 +119,15 @@ export function ArtifactsPage() {
               const Icon = artifact.kind === "html" ? Code2 : FileText
               const origem = chatTitle.get(artifact.chat_id)
               return (
-                <button
+                <div
                   key={artifact.id}
-                  type="button"
-                  onClick={() => selectChat(artifact.chat_id)}
-                  className="hover:shadow-elevate-sm flex flex-col rounded-xl border border-border bg-card p-4 text-left transition-colors outline-none hover:border-primary/40 focus-visible:ring-2 focus-visible:ring-ring/60"
+                  className="hover:shadow-elevate-sm flex flex-col rounded-xl border border-border bg-card p-4 text-left transition-colors hover:border-primary/40"
                 >
-                  <div className="flex items-start gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openArtifactTab(artifact.id)}
+                    className="flex items-start gap-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/60"
+                  >
                     <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
                       <Icon className="size-3.5" />
                     </span>
@@ -131,18 +137,42 @@ export function ArtifactsPage() {
                     <span className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground uppercase">
                       {artifact.kind === "html" ? "HTML" : "MD"}
                     </span>
-                  </div>
+                  </button>
 
                   <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">
                     {origem ? `Conversa: ${origem}` : "Conversa removida"}
                   </p>
 
-                  <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+                  <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <span>v{artifact.version}</span>
                     <span aria-hidden>·</span>
                     <span>{formatRelative(artifact.updated_at)}</span>
+                    <span className="ml-auto flex gap-1">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 gap-1 px-2"
+                        title="Abrir em aba dedicada"
+                        onClick={() => openArtifactTab(artifact.id)}
+                      >
+                        <ExternalLink className="size-3" />
+                        Aba
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 gap-1 px-2"
+                        title="Abrir conversa"
+                        onClick={() => selectChat(artifact.chat_id)}
+                      >
+                        <MessageSquare className="size-3" />
+                        Chat
+                      </Button>
+                    </span>
                   </div>
-                </button>
+                </div>
               )
             })}
           </div>

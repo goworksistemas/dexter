@@ -8,11 +8,15 @@ import rateLimit from "@fastify/rate-limit"
 import Fastify from "fastify"
 
 import { config, corsOrigins } from "./config.js"
+import { connectorsBootSummary } from "./connectors/registry.js"
+import adminRoutes from "./routes/admin.js"
 import chatRoutes from "./routes/chat.js"
 import chatsRoutes from "./routes/chats.js"
 import connectionsRoutes from "./routes/connections.js"
+import connectorsRoutes from "./routes/connectors.js"
 import modelsRoutes from "./routes/models.js"
 import projectsRoutes from "./routes/projects.js"
+import transcribeRoutes from "./routes/transcribe.js"
 import { AuthError, ForbiddenError, NotFoundError } from "./services/auth.js"
 
 declare module "fastify" {
@@ -22,7 +26,11 @@ declare module "fastify" {
   }
 }
 
-const app = Fastify({ logger: { level: config.LOG_LEVEL } })
+// Anexos (imagem de referência em base64) facilmente passam de 1 MB.
+const app = Fastify({
+  logger: { level: config.LOG_LEVEL },
+  bodyLimit: 32 * 1024 * 1024,
+})
 
 app.decorateRequest("traceId", "")
 app.addHook("onRequest", async (request) => {
@@ -68,11 +76,17 @@ await app.register(chatRoutes)
 await app.register(chatsRoutes)
 await app.register(projectsRoutes)
 await app.register(connectionsRoutes)
+await app.register(connectorsRoutes)
 await app.register(modelsRoutes)
+await app.register(transcribeRoutes)
+await app.register(adminRoutes)
 
 async function start(): Promise<void> {
   try {
     await app.listen({ port: config.PORT, host: config.HOST })
+    for (const line of connectorsBootSummary()) {
+      app.log.info(`[connectors] ${line}`)
+    }
   } catch (err) {
     app.log.error(err)
     process.exit(1)

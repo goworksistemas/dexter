@@ -10,10 +10,11 @@ import { NotFoundError, resolveUser } from "../services/auth.js"
 import {
   deleteChat,
   getChatToolCalls,
-  getMessages,
+  getMessagesPage,
   listChats,
   renameChat,
   setChatProject,
+  truncateFromMessageId,
   truncateMessages,
 } from "../services/chat-store.js"
 import { stepFromToolCall, type AgentStep } from "../systems/progress.js"
@@ -44,9 +45,24 @@ export default async function chatsRoutes(app: FastifyInstance): Promise<void> {
     return listChats(userId)
   })
 
-  app.get<{ Params: { id: string } }>("/api/chats/:id/messages", async (request) => {
+  app.get<{
+    Params: { id: string }
+    Querystring: { limit?: string; before?: string }
+  }>("/api/chats/:id/messages", async (request) => {
     const { userId } = await resolveUser(request)
-    return getMessages(request.params.id, userId)
+    const limitRaw = request.query.limit
+    const limit = limitRaw !== undefined ? Number(limitRaw) : 40
+    if (!Number.isFinite(limit) || limit < 1 || limit > 100) {
+      throw badRequest("limit deve ser um inteiro entre 1 e 100.")
+    }
+    const before = request.query.before
+    if (before !== undefined && !z.string().uuid().safeParse(before).success) {
+      throw badRequest("before deve ser um UUID de mensagem.")
+    }
+    return getMessagesPage(request.params.id, userId, {
+      limit,
+      ...(before ? { before } : {}),
+    })
   })
 
   /**
@@ -116,11 +132,17 @@ export default async function chatsRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(204).send()
   })
 
-  const truncateBodySchema = z.object({
-    keepCount: z.number().int().min(0),
-  })
+  const truncateBodySchema = z
+    .object({
+      keepCount: z.number().int().min(0).optional(),
+      deleteFromMessageId: z.string().uuid().optional(),
+    })
+    .refine(
+      (b) => b.keepCount !== undefined || b.deleteFromMessageId !== undefined,
+      { message: "Informe keepCount ou deleteFromMessageId." },
+    )
 
-  /** Mantém as primeiras N mensagens; apaga o restante (edit/regenerate). */
+  /** Truncar histórico (edit/regenerate) — por contagem ou a partir de um id. */
   app.post<{ Params: { id: string } }>(
     "/api/chats/:id/truncate",
     async (request, reply) => {
@@ -128,16 +150,25 @@ export default async function chatsRoutes(app: FastifyInstance): Promise<void> {
       const parsed = truncateBodySchema.safeParse(request.body ?? {})
       if (!parsed.success) {
         throw badRequest(
-          parsed.error.issues[0]?.message ?? "Body inválido (keepCount).",
+          parsed.error.issues[0]?.message ?? "Body inválido.",
         )
       }
-      const ok = await truncateMessages(
-        request.params.id,
-        userId,
-        parsed.data.keepCount,
-      )
+      let ok: boolean
+      if (parsed.data.deleteFromMessageId) {
+        ok = await truncateFromMessageId(
+          request.params.id,
+          userId,
+          parsed.data.deleteFromMessageId,
+        )
+      } else {
+        ok = await truncateMessages(
+          request.params.id,
+          userId,
+          parsed.data.keepCount ?? 0,
+        )
+      }
       if (!ok) {
-        throw new NotFoundError("Conversa não encontrada.")
+        throw new NotFoundError("Conversa ou mensagem não encontrada.")
       }
       return reply.code(204).send()
     },

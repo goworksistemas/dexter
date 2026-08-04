@@ -16,3 +16,8 @@ export { useChatStepsHistory } from "./use-chat-steps"
 export { formatarDuracao } from "./run-steps"
 export type { RunProgress, RunStep, RunStepStatus } from "./run-steps"
 export type { ChatMessageRecord, ChatSummary } from "./types"
+export {
+  useChatActions,
+  type ChatMenuState,
+  type MoveDialogState,
+} from "./use-chat-actions"

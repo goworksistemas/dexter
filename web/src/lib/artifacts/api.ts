@@ -18,6 +18,31 @@ function isMissingTruncatedColumn(message: string): boolean {
   return /is_truncated/i.test(message) && /column|does not exist|schema/i.test(message)
 }
 
+export async function fetchArtifactById(
+  id: string,
+): Promise<AgentArtifact | null> {
+  if (!supabase || !id) return null
+  const { data, error } = await supabase
+    .from("agent_artifacts")
+    .select(SELECT_COLS)
+    .eq("id", id)
+    .maybeSingle()
+
+  if (error && isMissingTruncatedColumn(error.message)) {
+    const legacy = await supabase
+      .from("agent_artifacts")
+      .select(SELECT_COLS_LEGACY)
+      .eq("id", id)
+      .maybeSingle()
+    if (legacy.error) throw new Error(legacy.error.message)
+    return legacy.data
+      ? normalize(legacy.data as AgentArtifact)
+      : null
+  }
+  if (error) throw new Error(error.message)
+  return data ? normalize(data as AgentArtifact) : null
+}
+
 export async function fetchArtifactsForChat(
   chatId: string,
 ): Promise<AgentArtifact[]> {

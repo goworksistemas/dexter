@@ -15,11 +15,21 @@ export interface Thread {
 
 export type ThemePreference = "light" | "dark" | "system"
 
+export interface ConnectorPreferences {
+  notion?: boolean
+  outlook?: boolean
+}
+
 export interface UserPreferences {
   theme?: ThemePreference
   /** Sidebar desktop em modo compacto (só ícones). */
   sidebarCollapsed?: boolean
+  /** Conectores externos (Notion / Outlook) ligados no AgentCore. */
+  connectors?: ConnectorPreferences
 }
+
+/** Papel do usuário no Dexter (tabela profiles.role). */
+export type DexterRole = "user" | "admin" | "master"
 
 /** Perfil do usuário autenticado, derivado da sessão Supabase + profiles. */
 export interface UserProfile {
@@ -28,4 +38,6 @@ export interface UserProfile {
   name?: string
   avatarUrl?: string
   preferences?: UserPreferences
+  role?: DexterRole
+  disabledAt?: string | null
 }

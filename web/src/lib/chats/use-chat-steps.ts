@@ -21,26 +21,31 @@ export function useChatStepsHistory(chatId: string): Record<string, RunStep[]> {
     const controller = new AbortController()
     setPorMensagem(VAZIO)
 
-    fetchChatSteps(chatId, controller.signal)
-      .then((registros) => {
-        if (controller.signal.aborted) return
-        if (registros.length === 0) {
-          setPorMensagem(VAZIO)
-          return
-        }
-        const mapa: Record<string, RunStep[]> = {}
-        for (const registro of registros) {
-          mapa[registro.messageId] = registro.steps.map(stepFromWire)
-        }
-        setPorMensagem(mapa)
-      })
-      .catch((err) => {
-        if (controller.signal.aborted) return
-        // Detalhe opcional: falhar aqui não pode atrapalhar a conversa.
-        console.error(`Falha ao carregar passos da conversa ${chatId}:`, err)
-      })
+    // Depois das mensagens — "Ver detalhes" não bloqueia a troca de chat.
+    const timer = window.setTimeout(() => {
+      fetchChatSteps(chatId, controller.signal)
+        .then((registros) => {
+          if (controller.signal.aborted) return
+          if (registros.length === 0) {
+            setPorMensagem(VAZIO)
+            return
+          }
+          const mapa: Record<string, RunStep[]> = {}
+          for (const registro of registros) {
+            mapa[registro.messageId] = registro.steps.map(stepFromWire)
+          }
+          setPorMensagem(mapa)
+        })
+        .catch((err) => {
+          if (controller.signal.aborted) return
+          console.error(`Falha ao carregar passos da conversa ${chatId}:`, err)
+        })
+    }, 250)
 
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
   }, [chatId])
 
   return porMensagem

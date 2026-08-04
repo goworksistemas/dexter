@@ -2,14 +2,13 @@ import * as React from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 import { toast } from "sonner"
 
+import { ChatActionsOverlays } from "@/components/chat/chat-actions"
 import { useMediaQuery } from "@/hooks/use-media-query"
 import { useSidebar } from "@/hooks/use-sidebar"
-import { useChatRuns, useChats, type ChatSummary } from "@/lib/chats"
+import { useChatActions, useChatRuns, useChats } from "@/lib/chats"
 import { useAuth } from "@/providers/auth-provider"
-import { MoveChatDialog } from "@/components/projects/move-chat-dialog"
 
 import { ChatsSection } from "./chats-section"
-import { ChatActionsMenu, type ChatMenuState } from "./context-menus"
 import { isNewChatShortcut } from "./helpers"
 import { SidebarFooter } from "./sidebar-footer"
 import { SidebarHeader } from "./sidebar-header"
@@ -30,10 +29,9 @@ export function Sidebar() {
     activeChatId,
     newChat,
     selectChat,
-    renameChat,
-    deleteChat,
     refreshChats,
   } = useChats()
+  const chatActions = useChatActions()
   const { runningChatIds } = useChatRuns()
   const { user, signOut } = useAuth()
   const navigate = useNavigate()
@@ -49,18 +47,7 @@ export function Sidebar() {
 
   const [query, setQuery] = React.useState("")
   const [searchOpen, setSearchOpen] = React.useState(false)
-  const [renamingId, setRenamingId] = React.useState<string | null>(null)
-  const [renameValue, setRenameValue] = React.useState("")
-  const [chatMenu, setChatMenu] = React.useState<ChatMenuState | null>(null)
-  const [moveDialog, setMoveDialog] = React.useState<{
-    open: boolean
-    chatId: string | null
-    title: string
-    projectId: string | null
-  }>({ open: false, chatId: null, title: "", projectId: null })
-
   const searchInputRef = React.useRef<HTMLInputElement>(null)
-  const renameInputRef = React.useRef<HTMLInputElement>(null)
 
   const filteredChats = React.useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -72,10 +59,6 @@ export function Sidebar() {
     () => filteredChats.slice(0, RECENT_LIMIT),
     [filteredChats],
   )
-
-  React.useEffect(() => {
-    if (renamingId) renameInputRef.current?.focus()
-  }, [renamingId])
 
   // Foco no campo assim que a busca abre (inclusive vindo do rail).
   React.useEffect(() => {
@@ -112,47 +95,13 @@ export function Sidebar() {
     }
   }, [navigate, signOut])
 
-  const commitRename = async (id: string) => {
-    const title = renameValue.trim()
-    setRenamingId(null)
-    if (!title || title.length > 120) {
-      toast.error("Título deve ter entre 1 e 120 caracteres.")
-      return
-    }
-    const atual = chats.find((c) => c.id === id)?.title
-    if (title === atual) return
-    try {
-      await renameChat(id, title)
-      toast.success("Conversa renomeada.")
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Falha ao renomear.")
-    }
-  }
-
-  const handleDeleteChat = async (id: string, title: string) => {
-    const ok = window.confirm(
-      `Excluir a conversa "${title || "sem título"}"? Esta ação não pode ser desfeita.`,
-    )
-    if (!ok) return
-    try {
-      await deleteChat(id)
-      toast.success("Conversa excluída.")
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Falha ao excluir.")
-    }
-  }
-
-  const openChatMenu = (e: React.MouseEvent, chat: ChatSummary) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setChatMenu({
-      chatId: chat.id,
-      title: chat.title || "Sem título",
-      projectId: chat.project_id,
-      x: e.clientX,
-      y: e.clientY,
-    })
-  }
+  const chatMenuActions = chatActions.chatMenu
+    ? chatActions.actionsForChat(
+        chatActions.chatMenu.chatId,
+        chatActions.chatMenu.title,
+        chatActions.chatMenu.projectId,
+      )
+    : null
 
   return (
     <>
@@ -187,6 +136,7 @@ export function Sidebar() {
                 })
               }}
               onCloseMobile={closeOnMobile}
+              onGoHome={handleNewChat}
             />
 
             {searchOpen ? (
@@ -224,19 +174,19 @@ export function Sidebar() {
                 runningChatIds={runningChatIds}
                 hasQuery={Boolean(query.trim())}
                 rename={{
-                  id: renamingId,
-                  value: renameValue,
-                  inputRef: renameInputRef,
-                  onChange: setRenameValue,
-                  onCommit: (id) => void commitRename(id),
-                  onCancel: () => setRenamingId(null),
+                  id: chatActions.renamingId,
+                  value: chatActions.renameValue,
+                  inputRef: chatActions.renameInputRef,
+                  onChange: chatActions.setRenameValue,
+                  onCommit: (id) => void chatActions.commitRename(id),
+                  onCancel: chatActions.cancelRename,
                 }}
                 onRetry={() => refreshChats()}
                 onSelect={(chat) => {
                   selectChat(chat.id)
                   closeOnMobile()
                 }}
-                onOpenMenu={openChatMenu}
+                onOpenMenu={chatActions.openChatMenu}
                 onNavigate={closeOnMobile}
               />
             </div>
@@ -250,36 +200,14 @@ export function Sidebar() {
         )}
       </SidebarShell>
 
-      {chatMenu ? (
-        <ChatActionsMenu
-          menu={chatMenu}
-          onClose={() => setChatMenu(null)}
-          onRename={() => {
-            setRenamingId(chatMenu.chatId)
-            setRenameValue(chatMenu.title)
-          }}
-          onMove={() =>
-            setMoveDialog({
-              open: true,
-              chatId: chatMenu.chatId,
-              title: chatMenu.title,
-              projectId: chatMenu.projectId,
-            })
-          }
-          onDelete={() =>
-            void handleDeleteChat(chatMenu.chatId, chatMenu.title)
-          }
-        />
-      ) : null}
-
-      <MoveChatDialog
-        open={moveDialog.open}
-        onOpenChange={(next) =>
-          setMoveDialog((prev) => ({ ...prev, open: next }))
+      <ChatActionsOverlays
+        chatMenu={chatActions.chatMenu}
+        onCloseChatMenu={chatActions.closeChatMenu}
+        actionsForMenu={chatMenuActions}
+        moveDialog={chatActions.moveDialog}
+        onMoveDialogOpenChange={(open) =>
+          chatActions.setMoveDialog((prev) => ({ ...prev, open }))
         }
-        chatId={moveDialog.chatId}
-        chatTitle={moveDialog.title}
-        currentProjectId={moveDialog.projectId}
       />
     </>
   )

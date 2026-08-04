@@ -5,6 +5,7 @@ import { toast } from "sonner"
 import { AuthLayout } from "@/components/auth/auth-layout"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { allowedDomainsLabel } from "@/lib/auth/email-domain"
 import {
   ensureProfileFromUser,
   hasSupabase,
@@ -97,6 +98,9 @@ export function SignupPage() {
             placeholder="voce@gowork.com.br"
             required
           />
+          <p className="text-xs text-muted-foreground">
+            Acesso exclusivo a e-mails {allowedDomainsLabel()}.
+          </p>
         </div>
 
         <div className="space-y-1.5">

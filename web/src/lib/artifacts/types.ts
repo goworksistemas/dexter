@@ -10,7 +10,7 @@ export interface AgentArtifact {
   content: string
   version: number
   source_key: string
-  /** Resposta cortada / fence aberto — não injetar no prompt. */
+  /** Resposta cortada / fence aberto — injetado marcado INCOMPLETO p/ completar. */
   is_truncated: boolean
   created_at: string
   updated_at: string

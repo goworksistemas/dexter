@@ -5,85 +5,132 @@
  * Infisical (projeto "agentcore"). Em dev: `infisical run -- pnpm dev`.
  * Em prod (Portainer): variáveis vêm do Infisical/stack. Valida com zod e
  * falha rápido/claro se faltar algo.
+ *
+ * Catálogo de modelos é dinâmico (APIs dos providers). Aqui só secrets/infra.
+ * Admin só guarda overrides (ocultar/default) em `dexter_model_overrides`.
  */
 import { z } from "zod"
 
-const schema = z
-  .object({
-    PORT: z.coerce.number().default(8787),
-    HOST: z.string().default("0.0.0.0"),
-    LOG_LEVEL: z
-      .enum(["fatal", "error", "warn", "info", "debug", "trace"])
-      .default("info"),
-    CORS_ORIGINS: z
-      .string()
-      .default("http://localhost:5273,http://localhost:5274"),
+const schema = z.object({
+  PORT: z.coerce.number().default(8787),
+  HOST: z.string().default("0.0.0.0"),
+  LOG_LEVEL: z
+    .enum(["fatal", "error", "warn", "info", "debug", "trace"])
+    .default("info"),
+  CORS_ORIGINS: z
+    .string()
+    .default("http://localhost:5273,http://localhost:5274"),
 
-    // --- Roteador de LLM ---
-    // "anthropic" (Claude via API) ou "ollama" (modelo self-hosted GoWork).
-    LLM_PROVIDER: z.enum(["anthropic", "ollama"]).default("anthropic"),
+  /** @deprecated Não controla mais o catálogo; mantido por compat. */
+  LLM_PROVIDER: z
+    .enum(["anthropic", "ollama", "openai", "gemini"])
+    .default("anthropic"),
 
-    // Anthropic — obrigatório SÓ quando LLM_PROVIDER=anthropic (ver refine).
-    ANTHROPIC_API_KEY: z.string().optional(),
-    ANTHROPIC_MODEL: z.string().default("claude-sonnet-5"),
+  ANTHROPIC_API_KEY: z.string().optional(),
+  /** @deprecated Default vem do discovery + override admin. */
+  ANTHROPIC_MODEL: z.string().default("claude-sonnet-5"),
 
-    // Ollama self-hosted (GoWork). Sem chave — protegido por rede/host.
-    OLLAMA_BASE_URL: z.string().url().default("https://ollama.gowork.com.br"),
-    OLLAMA_MODEL: z.string().default("qwen2.5:7b"),
-    OLLAMA_NUM_CTX: z.coerce.number().default(4096),
+  OPENAI_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
 
-    // Supabase (projeto agentcore) — URL tem default (conhecido); só o
-    // service_role precisa ser cadastrado (é secret, obrigatório).
-    SUPABASE_URL: z
-      .string()
-      .url()
-      .default("https://jtvscxbwralvzpfhtqcs.supabase.co"),
-    SUPABASE_SERVICE_ROLE_KEY: z
-      .string()
-      .min(1, "SUPABASE_SERVICE_ROLE_KEY é obrigatório"),
+  OLLAMA_BASE_URL: z.string().url().default("https://ollama.gowork.com.br"),
+  /** Usado só para o seed ollama-default / api_model efetivo. */
+  OLLAMA_MODEL: z.string().default("qwen2.5:7b"),
+  OLLAMA_NUM_CTX: z.coerce.number().default(4096),
 
-    // uuid usado como user_id só quando ALLOW_DEV_USER=true e não há JWT.
-    DEV_USER_ID: z
-      .string()
-      .min(1)
-      .default("00000000-0000-4000-8000-000000000001"),
+  /**
+   * Speech-to-text (OpenAI-compatible `/v1/audio/transcriptions`).
+   * Vazio → api.openai.com. Pode apontar pro server dedicado (ex. Ollama/Whisper).
+   */
+  STT_BASE_URL: z.string().url().optional(),
+  STT_MODEL: z.string().default("gpt-4o-transcribe"),
+  /** Se vazio, usa OPENAI_API_KEY (ou OLLAMA_API_KEY se a base for Ollama). */
+  STT_API_KEY: z.string().optional(),
 
-    // Em prod deve ficar false/ausente. Em dev local pode ser true para
-    // testar o AgentCore sem o front autenticado.
-    ALLOW_DEV_USER: z
-      .enum(["true", "false"])
-      .default("false")
-      .transform((v) => v === "true"),
+  SUPABASE_URL: z
+    .string()
+    .url()
+    .default("https://jtvscxbwralvzpfhtqcs.supabase.co"),
+  SUPABASE_SERVICE_ROLE_KEY: z
+    .string()
+    .min(1, "SUPABASE_SERVICE_ROLE_KEY é obrigatório"),
 
-    RATE_LIMIT_MAX: z.coerce.number().default(60),
-    RATE_LIMIT_WINDOW: z.string().default("1 minute"),
+  DEV_USER_ID: z
+    .string()
+    .min(1)
+    .default("00000000-0000-4000-8000-000000000001"),
 
-    // --- Loop agêntico (defaults seguros; opcional no Infisical) ---
-    /** Máx. de tool calls por resposta antes da síntese forçada. */
-    AGENT_MAX_STEPS: z.coerce.number().int().positive().default(20),
-    /** Máx. de rodadas modelo↔tools por resposta. */
-    AGENT_MAX_ROUNDS: z.coerce.number().int().positive().default(12),
-    /** Timeout total do run (ms). */
-    AGENT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(480_000),
-    /** Timeout por chamada ao modelo (ms). */
-    AGENT_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
-    /** Truncamento de cada tool_result injetado no contexto (chars). */
-    AGENT_TOOL_RESULT_MAX_CHARS: z.coerce
-      .number()
-      .int()
-      .positive()
-      .default(12_000),
-  })
-  .superRefine((val, ctx) => {
-    if (val.LLM_PROVIDER === "anthropic" && !val.ANTHROPIC_API_KEY) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["ANTHROPIC_API_KEY"],
-        message:
-          "ANTHROPIC_API_KEY é obrigatório quando LLM_PROVIDER=anthropic (ou troque para LLM_PROVIDER=ollama)",
-      })
-    }
-  })
+  ALLOW_DEV_USER: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
+
+  /**
+   * Fallback de domínios permitidos (CSV) se a tabela
+   * dexter_allowed_email_domains estiver vazia/indisponível.
+   */
+  ALLOWED_EMAIL_DOMAINS: z.string().default("gowork.com.br"),
+
+  RATE_LIMIT_MAX: z.coerce.number().default(60),
+  RATE_LIMIT_WINDOW: z.string().default("1 minute"),
+
+  AGENT_MAX_STEPS: z.coerce.number().int().positive().default(20),
+  AGENT_MAX_ROUNDS: z.coerce.number().int().positive().default(12),
+  AGENT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(480_000),
+  AGENT_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  /** Teto do tool_result no contexto. Notion MCP (schema/markdown) precisa de folga. */
+  AGENT_TOOL_RESULT_MAX_CHARS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(24_000),
+
+  /**
+   * URL pública do AgentCore (callbacks OAuth).
+   * Ex.: https://agentcore.gowork.com.br ou http://localhost:8787
+   */
+  AGENTCORE_PUBLIC_URL: z.string().url().optional(),
+  /** URL do app Dexter após OAuth (default: primeiro CORS_ORIGINS). */
+  DEXTER_APP_URL: z.string().url().optional(),
+
+  /**
+   * Notion (legado REST) — NÃO necessário no caminho produto.
+   * Produto: MCP OAuth em mcp.notion.com (DCR+PKCE), sem Client ID.
+   */
+  NOTION_CLIENT_ID: z.string().optional(),
+  NOTION_CLIENT_SECRET: z.string().optional(),
+  NOTION_REDIRECT_URI: z.string().url().optional(),
+
+  /**
+   * Fallback admin-only: token de integração workspace.
+   * NÃO usar em produção multi-user. Só se NOTION_ALLOW_WORKSPACE_TOKEN=true.
+   */
+  NOTION_TOKEN: z.string().optional(),
+  NOTION_ALLOW_WORKSPACE_TOKEN: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => v === "true"),
+  /** Debug: stdio MCP Notion (opcional). Produto usa MCP HTTP remoto. */
+  MCP_NOTION_COMMAND: z.string().optional(),
+  MCP_NOTION_ARGS: z.string().optional(),
+
+  /**
+   * Outlook / Microsoft Graph — OAuth delegated (authorization code + refresh).
+   * Infisical (1×): CLIENT_ID/SECRET/TENANT — tokens por user_id no DB.
+   * Redirect: {AGENTCORE_PUBLIC_URL}/api/connectors/outlook/callback
+   * TENANT: guid do tenant ou "organizations".
+   */
+  MICROSOFT_CLIENT_ID: z.string().optional(),
+  MICROSOFT_CLIENT_SECRET: z.string().optional(),
+  MICROSOFT_TENANT_ID: z.string().optional(),
+  MICROSOFT_REDIRECT_URI: z.string().url().optional(),
+  /** Debug: stdio MCP Outlook (opcional). Produto usa Graph REST. */
+  MCP_OUTLOOK_COMMAND: z.string().optional(),
+  MCP_OUTLOOK_ARGS: z.string().optional(),
+
+  /** Timeout de tools MCP / Graph / Notion (ms). */
+  MCP_TOOL_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+})
 
 const parsed = schema.safeParse(process.env)
 
@@ -94,7 +141,7 @@ if (!parsed.success) {
   // eslint-disable-next-line no-console
   console.error(
     `\n[AgentCore] Configuração inválida — variáveis de ambiente faltando ou erradas:\n${issues}\n` +
-      `As variáveis vêm do Infisical (projeto agentcore). Rode via \`infisical run -- pnpm dev\`.\n`
+      `As variáveis vêm do Infisical (projeto agentcore). Rode via \`infisical run -- pnpm dev\`.\n`,
   )
   process.exit(1)
 }

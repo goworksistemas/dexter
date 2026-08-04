@@ -1,6 +1,7 @@
 import * as React from "react"
 import { ArrowUp } from "lucide-react"
 
+import { ModelSelector } from "@/components/chat/model-selector"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -57,27 +58,29 @@ export function ProjectComposer({
         className="min-h-14 w-full resize-none bg-transparent px-2.5 py-2 text-sm text-card-foreground outline-none placeholder:text-muted-foreground"
       />
 
-      <div className="flex items-end justify-between gap-2 px-1">
+      <div className="flex items-center justify-between gap-2 px-1">
         <p className="min-w-0 flex-1 text-xs leading-snug text-muted-foreground">
           <span className="line-clamp-2">
-            A conversa nasce dentro de{" "}
+            Em{" "}
             <span className="font-medium text-foreground/80">{projectName}</span>
-            , com as instruções e os arquivos do projeto.
           </span>
         </p>
-        <Button
-          type="submit"
-          size="icon"
-          disabled={!text.trim()}
-          aria-label="Iniciar conversa"
-          className={cn(
-            "size-10 shrink-0 rounded-xl sm:size-9",
-            "bg-[linear-gradient(135deg,var(--primary),color-mix(in_srgb,var(--secondary)_35%,var(--primary)))]",
-            "transition-transform hover:scale-105 disabled:hover:scale-100",
-          )}
-        >
-          <ArrowUp className="size-4" />
-        </Button>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <ModelSelector />
+          <Button
+            type="submit"
+            size="icon"
+            disabled={!text.trim()}
+            aria-label="Iniciar conversa"
+            className={cn(
+              "size-8 shrink-0 rounded-xl",
+              "bg-[linear-gradient(135deg,var(--primary),color-mix(in_srgb,var(--secondary)_35%,var(--primary)))]",
+              "transition-transform hover:scale-105 disabled:hover:scale-100",
+            )}
+          >
+            <ArrowUp className="size-4" />
+          </Button>
+        </div>
       </div>
     </form>
   )

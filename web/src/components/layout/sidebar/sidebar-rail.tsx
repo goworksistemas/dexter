@@ -5,7 +5,6 @@ import {
   PanelLeft,
   Plus,
   Search,
-  Settings,
 } from "lucide-react"
 import { Link } from "react-router-dom"
 
@@ -71,10 +70,15 @@ export function SidebarRail({
   return (
     <div className="flex h-full w-full flex-col">
       <div className="flex h-14 w-full shrink-0 items-center justify-center">
-        <SidebarTip label="Dexter">
-          <span className="flex size-10 items-center justify-center">
+        <SidebarTip label="Início">
+          <button
+            type="button"
+            aria-label="Ir para o início"
+            onClick={onNewChat}
+            className="flex size-10 items-center justify-center rounded-lg outline-none ring-sidebar-ring focus-visible:ring-2"
+          >
             <DexterMark className="size-7 rounded-lg" />
-          </span>
+          </button>
         </SidebarTip>
       </div>
 
@@ -138,20 +142,6 @@ export function SidebarRail({
       </div>
 
       <div className="flex w-full shrink-0 flex-col items-center gap-1 border-t border-sidebar-border/60 px-2 py-3">
-        <SidebarTip label="Configurações">
-          <Link
-            to="/settings"
-            aria-label="Configurações"
-            aria-current={pathname.startsWith("/settings") ? "page" : undefined}
-            className={cn(
-              railItemClass,
-              pathname.startsWith("/settings") && railItemActiveClass,
-            )}
-          >
-            <Settings className="size-4.5" />
-          </Link>
-        </SidebarTip>
-
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button

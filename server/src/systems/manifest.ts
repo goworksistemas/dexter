@@ -142,8 +142,9 @@ export const SYSTEM_TOOLS: Record<string, SystemTool[]> = {
     },
     {
       fn: "dexter_notion_tasks_resumo",
-      label: "Tarefas Notion",
-      description: "Contagem de tarefas por status/departamento + lista de atrasadas.",
+      label: "Tarefas Notion (sync GoDash)",
+      description:
+        "SYNC GoDash das tarefas Notion do quadro interno GoWork: contagem por status/departamento + atrasadas. NÃO é o workspace Notion completo do usuário — para Notion ao vivo (cards/páginas/databases do workspace conectado), use o conector Notion (notion__*).",
       params: [{ name: "p_dias", type: "number", description: "Janela em dias (default 30)." }],
     },
     {

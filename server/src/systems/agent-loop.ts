@@ -22,6 +22,7 @@ import Anthropic from "@anthropic-ai/sdk"
 
 import { config } from "../config.js"
 import { responseMaxTokens } from "../llm/models.js"
+import type { ConnectorRuntime } from "../connectors/types.js"
 import { buildTools, describeTool, executeTool, type AnthropicTool } from "./tools.js"
 import {
   resumirArgs,
@@ -55,6 +56,9 @@ export interface AgentLoopOptions {
   systemPrompt: string
   messages: Anthropic.MessageParam[]
   access: SystemAccess[]
+  /** Conectores Notion/Outlook ativos para este usuário. */
+  connectors?: ConnectorRuntime
+  userId: string
   email: string
   signal?: AbortSignal
   /** chamado a cada delta de texto (para o SSE). */
@@ -103,6 +107,29 @@ const PROMPT_FINAL_FORCADO =
   "ao usuário em português — análise, exemplos e detalhes pedidos. " +
   "NÃO chame mais tools. Se faltar dado, diga o que falta e o que já conseguiu apurar."
 
+const PROMPT_FECHAR_RESPOSTA =
+  "Você narrou que ia buscar dados ou parou sem fechar a resposta. " +
+  "Com o que as tools acima já retornaram, escreva AGORA a resposta final completa " +
+  "em português com números concretos (ou diga claramente o que faltou e o escopo). " +
+  "NÃO chame mais tools. Não repita preâmbulos do tipo 'deixa eu puxar' / 'vou buscar'."
+
+/** Texto que parece intenção/preâmbulo sem conclusão — comum após tools. */
+function respostaIncompleta(texto: string, teveTools: boolean): boolean {
+  if (!teveTools) return false
+  const t = texto.trim()
+  if (!t) return true
+  const narracao =
+    /^(deixa eu|vou (puxar|buscar|consultar|verificar)|um momento|aguarde|já (volto|pego))/i.test(
+      t,
+    ) ||
+    /(deixa eu puxar|números certos|vou (consultar|buscar|puxar)|já busco)/i.test(t)
+  if (narracao && t.length < 500) return true
+  if (/(\.{3}|…)\s*$/.test(t) && t.length < 220 && !/\b\d+\b/.test(t)) {
+    return true
+  }
+  return false
+}
+
 /** Há um bloco ``` aberto e não fechado no texto já emitido? */
 function fenceAberto(texto: string): boolean {
   const fences = texto.match(/^```/gm)
@@ -137,17 +164,60 @@ function emendarContinuacao(cabecalho: string, anterior: string): string {
   return removerSobreposicao(out, anterior)
 }
 
+/** Fingerprint estável de tool+args para anti-loop. */
+function toolCallFingerprint(name: string, input: unknown): string {
+  try {
+    return `${name}::${JSON.stringify(input ?? {})}`
+  } catch {
+    return `${name}::?`
+  }
+}
+
+/** Resultado sem conteúdo útil (modelo refetcha em loop). */
+function isToolResultVazio(result: unknown): boolean {
+  if (result === null || result === undefined) return true
+  if (typeof result === "string") return result.trim().length < 8
+  if (Array.isArray(result)) return result.length === 0
+  if (typeof result === "object") {
+    const keys = Object.keys(result as object)
+    if (keys.length === 0) return true
+    // MCP cru sem texto útil
+    const r = result as { content?: unknown; structuredContent?: unknown }
+    if (
+      "content" in r &&
+      Array.isArray(r.content) &&
+      r.content.length === 0 &&
+      r.structuredContent == null
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
 /** Trunca tool_result grande para não estourar a janela de contexto.
- *  Preserva totais agregados (total_encontrado, count, aviso) para o modelo
- *  não confundir tamanho da lista com total real. */
+ *  Preserva totais agregados (GoDash) quando existirem.
+ *  NUNCA colapsa JSON genérico (ex.: Notion MCP) em `{}` — isso apagava
+ *  schema/markdown de notion-fetch e fazia o agent loop refetchar sem progresso. */
 function truncarToolResultContent(content: string, maxChars: number): string {
   if (content.length <= maxChars) return content
 
+  const rodape = (omitidos: number) =>
+    `\n\n[…resultado truncado (${omitidos} chars omitidos); use o trecho acima — não refetch o mesmo id]`
+
   try {
-    const parsed = JSON.parse(content) as Record<string, unknown>
+    const parsed = JSON.parse(content) as unknown
+
+    // Texto Notion (markdown/schema) chega como JSON string.
+    if (typeof parsed === "string") {
+      const budget = Math.max(500, maxChars - 120)
+      if (parsed.length <= budget) return content
+      return JSON.stringify(parsed.slice(0, budget) + rodape(parsed.length - budget))
+    }
+
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const preserved: Record<string, unknown> = {}
-      for (const key of [
+      const obj = parsed as Record<string, unknown>
+      const aggregateKeys = [
         "total_encontrado",
         "total_retornado",
         "total",
@@ -156,30 +226,33 @@ function truncarToolResultContent(content: string, maxChars: number): string {
         "erro",
         "filtros",
         "limite_aplicado",
-      ]) {
-        if (key in parsed) preserved[key] = parsed[key]
-      }
-      const linhas = parsed.linhas ?? parsed.itens
-      if (Array.isArray(linhas) && linhas.length <= 5) {
-        preserved[Array.isArray(parsed.linhas) ? "linhas" : "itens"] = linhas
-      }
-      const header = JSON.stringify(preserved, null, 2)
-      if (header.length < maxChars) {
-        return (
-          header +
-          "\n\n[…lista/demais campos truncados; use total_encontrado/total_retornado/count acima como total autoritativo]"
-        )
+      ] as const
+      const hasAggregate = aggregateKeys.some((k) => k in obj)
+
+      // Só o caminho GoDash (listas com total_*): preserva agregados.
+      if (hasAggregate) {
+        const preserved: Record<string, unknown> = {}
+        for (const key of aggregateKeys) {
+          if (key in obj) preserved[key] = obj[key]
+        }
+        const linhas = obj.linhas ?? obj.itens
+        if (Array.isArray(linhas) && linhas.length <= 5) {
+          preserved[Array.isArray(obj.linhas) ? "linhas" : "itens"] = linhas
+        }
+        const header = JSON.stringify(preserved, null, 2)
+        if (header.length < maxChars) {
+          return (
+            header +
+            "\n\n[…lista/demais campos truncados; use total_encontrado/total_retornado/count acima como total autoritativo]"
+          )
+        }
       }
     }
   } catch {
     /* não-JSON */
   }
 
-  return (
-    content.slice(0, maxChars) +
-    "\n\n[…resultado truncado para caber no contexto; " +
-    "peça count(*) ou um recorte mais específico se precisar do total exato]"
-  )
+  return content.slice(0, maxChars) + rodape(content.length - maxChars)
 }
 
 function mensagemApiError(err: unknown): string {
@@ -214,7 +287,11 @@ function combineSignals(
 
 /** Roda o loop de tool-use com streaming. */
 export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopResult> {
-  const tools: AnthropicTool[] = buildTools(opts.access)
+  const tools: AnthropicTool[] = await buildTools({
+    access: opts.access,
+    connectors: opts.connectors,
+    userId: opts.userId,
+  })
   const messages: Anthropic.MessageParam[] = [...opts.messages]
   const maxRounds = opts.maxRounds ?? config.AGENT_MAX_ROUNDS
   const maxSteps = opts.maxSteps ?? config.AGENT_MAX_STEPS
@@ -232,6 +309,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   /** Todo o texto já entregue ao front nesta requisição (base da emenda). */
   let textoEmitido = ""
   let endReason: AgentLoopEndReason = "ok"
+  /** Conta falhas/vazios da mesma tool+args — corta loop Notion refetch. */
+  const toolFailCounts = new Map<string, number>()
 
   const progress = (evt: AgentProgressEvent): void => opts.onProgress?.(evt)
   const status = (text: string): void => {
@@ -413,7 +492,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       }
 
       const allowTools = step < maxSteps && tools.length > 0
-      status(round === 0 ? "Pensando" : "Analisando os resultados")
+      status(
+        round === 0
+          ? "Pensando"
+          : step > 0
+            ? "Interpretando os dados"
+            : "Pensando",
+      )
 
       const final = await streamTurn({ allowTools })
 
@@ -422,6 +507,20 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       )
 
       if (toolUses.length === 0) {
+        if (respostaIncompleta(textoEmitido, step > 0)) {
+          status("Fechando a resposta")
+          try {
+            await streamTurn({
+              allowTools: false,
+              extraUser: PROMPT_FECHAR_RESPOSTA,
+            })
+            endReason = textoEmitido.trim() ? "ok" : "empty"
+          } catch (err) {
+            if (abortado()) throw err
+            endReason = textoEmitido.trim() ? "ok" : "empty"
+          }
+          break
+        }
         endReason = textoEmitido.trim() ? "ok" : "empty"
         break
       }
@@ -456,11 +555,45 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           ...(argsSummary ? { args_summary: argsSummary } : {}),
         })
 
-        const exec = await executeTool(
-          tu.name,
-          (tu.input ?? {}) as Record<string, unknown>,
-          { email: opts.email, access: opts.access },
-        )
+        const fp = toolCallFingerprint(tu.name, tu.input)
+        const falhasPrevias = toolFailCounts.get(fp) ?? 0
+
+        let exec: Awaited<ReturnType<typeof executeTool>>
+        if (falhasPrevias >= 2) {
+          exec = {
+            ok: false,
+            slug: descricao.slug,
+            fn: descricao.fn,
+            error:
+              `Anti-loop: a tool ${tu.name} com os mesmos argumentos já falhou/voltou vazia ${falhasPrevias}x. ` +
+              "NÃO refetch o mesmo id. Informe o erro técnico ao usuário (permissão Notion, data_source_id errado, ou schema indisponível) e pare.",
+          }
+        } else {
+          exec = await executeTool(
+            tu.name,
+            (tu.input ?? {}) as Record<string, unknown>,
+            {
+              userId: opts.userId,
+              email: opts.email,
+              access: opts.access,
+              connectors: opts.connectors,
+            },
+          )
+          if (!exec.ok || isToolResultVazio(exec.result)) {
+            toolFailCounts.set(fp, falhasPrevias + 1)
+            if (exec.ok && isToolResultVazio(exec.result)) {
+              exec = {
+                ok: false,
+                slug: exec.slug,
+                fn: exec.fn,
+                error:
+                  "Resposta vazia da tool (sem schema/conteúdo útil). " +
+                  "Não repita a mesma chamada. Se for Notion: confira o id (database vs collection:// data_source) " +
+                  "ou peça ao usuário para reconectar o Notion e garantir acesso à base.",
+              }
+            }
+          }
+        }
 
         const durationMs = Date.now() - started
         const resumo = resumirResultado({

@@ -1,4 +1,4 @@
-import { ChevronsUpDown, LogOut, Settings, UserRound } from "lucide-react"
+import { ChevronsUpDown, LogOut, Settings, Shield, UserRound } from "lucide-react"
 import { Link } from "react-router-dom"
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -10,6 +10,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { useAuth } from "@/providers/auth-provider"
 import { initials } from "./helpers"
 
 export type SidebarUser = {
@@ -30,6 +31,10 @@ export function UserMenuContent({
   onNavigate: () => void
   onSignOut: () => void
 }) {
+  const { user: authUser } = useAuth()
+  const isStaff =
+    authUser?.role === "admin" || authUser?.role === "master"
+
   return (
     <DropdownMenuContent side={side} align="start" className="min-w-56">
       <DropdownMenuLabel className="font-normal">
@@ -52,6 +57,15 @@ export function UserMenuContent({
           Configurações
         </Link>
       </DropdownMenuItem>
+      {isStaff ? (
+        <DropdownMenuItem asChild>
+          <Link to="/admin" onClick={onNavigate}>
+            <Shield className="size-4" />
+            Admin
+          </Link>
+        </DropdownMenuItem>
+      ) : null}
+      <DropdownMenuSeparator />
       <DropdownMenuItem variant="destructive" onSelect={onSignOut}>
         <LogOut className="size-4" />
         Sair
@@ -102,6 +116,12 @@ export function SidebarFooter({
           onSignOut={onSignOut}
         />
       </DropdownMenu>
+      <p
+        className="px-2 pt-1.5 text-[10px] leading-none tracking-wide text-sidebar-foreground/35"
+        aria-label={`Versão ${__APP_VERSION__}`}
+      >
+        v{__APP_VERSION__}
+      </p>
     </div>
   )
 }

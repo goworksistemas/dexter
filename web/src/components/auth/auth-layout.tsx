@@ -1,4 +1,3 @@
-import { Brain } from "lucide-react"
 import { Link } from "react-router-dom"
 import type { ReactNode } from "react"
 
@@ -28,13 +27,12 @@ export function AuthLayout({
     <div className="flex h-dvh items-center justify-center overflow-y-auto bg-background px-4 py-10 [background-image:radial-gradient(ellipse_120%_80%_at_50%_-20%,color-mix(in_srgb,var(--primary)_14%,transparent),transparent_55%)]">
       <div className="w-full max-w-md">
         <div className="mb-6 flex flex-col items-center gap-3 text-center">
-          <Link to="/login" className="flex items-center gap-2.5">
-            <span
-              className="flex size-9 items-center justify-center rounded-full bg-violet-500 text-white"
-              aria-hidden
-            >
-              <Brain className="size-4" strokeWidth={2.5} />
-            </span>
+          <Link to="/login" className="flex flex-col items-center gap-2">
+            <img
+              src="/dexter.png"
+              alt="Dexter"
+              className="size-16 object-contain drop-shadow-md"
+            />
             <span className="text-xl font-semibold text-foreground">Dexter</span>
           </Link>
         </div>

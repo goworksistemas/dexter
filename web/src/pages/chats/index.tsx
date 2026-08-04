@@ -1,11 +1,20 @@
 import * as React from "react"
-import { MessageSquare, Plus, Search } from "lucide-react"
+import { MessageSquare, MoreHorizontal, Plus, Search } from "lucide-react"
 
+import {
+  ChatActionDropdownItems,
+  ChatActionsOverlays,
+} from "@/components/chat/chat-actions"
 import { PageHeading, PageShell } from "@/components/layout/page-shell"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Skeleton } from "@/components/ui/skeleton"
-import { useChatRuns, useChats } from "@/lib/chats"
+import { useChatActions, useChatRuns, useChats } from "@/lib/chats"
 import { formatRelative } from "@/lib/dates"
 import { useProjects } from "@/lib/projects"
 import { RunningDots } from "@/components/layout/sidebar/shared"
@@ -20,6 +29,7 @@ export function ChatsPage() {
     newChat,
     refreshChats,
   } = useChats()
+  const chatActions = useChatActions()
   const { runningChatIds } = useChatRuns()
   const { projects } = useProjects()
   const [query, setQuery] = React.useState("")
@@ -35,6 +45,14 @@ export function ChatsPage() {
     if (!q) return chats
     return chats.filter((c) => (c.title || "").toLowerCase().includes(q))
   }, [chats, query])
+
+  const chatMenuActions = chatActions.chatMenu
+    ? chatActions.actionsForChat(
+        chatActions.chatMenu.chatId,
+        chatActions.chatMenu.title,
+        chatActions.chatMenu.projectId,
+      )
+    : null
 
   return (
     <PageShell>
@@ -89,23 +107,58 @@ export function ChatsPage() {
           <ul className="divide-y divide-border">
             {visible.map((chat) => {
               const active = chat.id === activeChatId
+              const title = chat.title || "Sem título"
               const project = chat.project_id
                 ? projectName.get(chat.project_id)
                 : undefined
+              const actions = chatActions.actionsForChat(
+                chat.id,
+                title,
+                chat.project_id,
+              )
+
+              if (chatActions.renamingId === chat.id) {
+                return (
+                  <li key={chat.id} className="px-4 py-2">
+                    <Input
+                      ref={chatActions.renameInputRef}
+                      value={chatActions.renameValue}
+                      onChange={(e) =>
+                        chatActions.setRenameValue(e.target.value)
+                      }
+                      onBlur={() => void chatActions.commitRename(chat.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault()
+                          void chatActions.commitRename(chat.id)
+                        }
+                        if (e.key === "Escape") chatActions.cancelRename()
+                      }}
+                      className="h-8 text-sm"
+                      aria-label="Novo título da conversa"
+                    />
+                  </li>
+                )
+              }
+
               return (
-                <li key={chat.id}>
+                <li
+                  key={chat.id}
+                  className="group/row flex items-center"
+                  onContextMenu={(e) => chatActions.openChatMenu(e, chat)}
+                >
                   <button
                     type="button"
                     onClick={() => selectChat(chat.id)}
                     aria-current={active ? "page" : undefined}
-                    className="flex w-full items-center gap-2.5 px-4 py-2.5 text-left transition-colors hover:bg-accent"
+                    className="flex min-w-0 flex-1 items-center gap-2.5 px-4 py-2.5 text-left transition-colors hover:bg-accent"
                   >
                     <MessageSquare
                       aria-hidden
                       className="size-4 shrink-0 text-muted-foreground"
                     />
                     <span className="min-w-0 flex-1 truncate text-sm text-card-foreground">
-                      {chat.title || "Sem título"}
+                      {title}
                     </span>
                     {runningChatIds.has(chat.id) ? <RunningDots /> : null}
                     {project ? (
@@ -117,12 +170,38 @@ export function ChatsPage() {
                       {formatRelative(chat.updated_at)}
                     </span>
                   </button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="mr-2 size-8 shrink-0 opacity-100 sm:opacity-0 sm:group-hover/row:opacity-100"
+                        aria-label={`Ações da conversa ${title}`}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <MoreHorizontal className="size-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="min-w-48">
+                      <ChatActionDropdownItems {...actions} />
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </li>
               )
             })}
           </ul>
         )}
       </div>
+
+      <ChatActionsOverlays
+        chatMenu={chatActions.chatMenu}
+        onCloseChatMenu={chatActions.closeChatMenu}
+        actionsForMenu={chatMenuActions}
+        moveDialog={chatActions.moveDialog}
+        onMoveDialogOpenChange={(open) =>
+          chatActions.setMoveDialog((prev) => ({ ...prev, open }))
+        }
+      />
     </PageShell>
   )
 }

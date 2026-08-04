@@ -48,10 +48,11 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
   const [defaultId, setDefaultId] = React.useState<string>("")
   const abortRef = React.useRef<AbortController | null>(null)
 
-  const load = React.useCallback(() => {
+  const load = React.useCallback((opts?: { probe?: boolean }) => {
     abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
+    const probe = opts?.probe ?? true
 
     if (!isAuthenticated) {
       setAllModels([])
@@ -61,39 +62,50 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
       return
     }
 
-    setIsLoading(true)
+    // Probe completo só no 1º load / refresh manual — focus não pode travar o chat.
+    if (probe) setIsLoading(true)
     setError(null)
 
-    fetchModels(controller.signal, { probe: true })
+    fetchModels(controller.signal, { probe })
       .then(({ default: def, models: lista }) => {
         setDefaultId(def)
         setAllModels(lista)
         const online = lista.filter((m) => m.available !== false)
-        setSelectedModelId(resolveSelectedId(online, def))
+        const next = resolveSelectedId(online, def)
+        setSelectedModelId(next)
+        // Se o id salvo era modelo morto/removido, persiste o realinhamento.
+        if (next && readStoredModelId() !== next) {
+          window.localStorage.setItem(STORAGE_KEY, next)
+        }
       })
       .catch((err) => {
         if (controller.signal.aborted) return
         setError(err instanceof Error ? err.message : String(err))
-        setAllModels([])
-        setSelectedModelId(null)
+        if (probe) {
+          setAllModels([])
+          setSelectedModelId(null)
+        }
       })
       .finally(() => {
-        if (!controller.signal.aborted) setIsLoading(false)
+        if (!controller.signal.aborted && probe) setIsLoading(false)
       })
   }, [isAuthenticated])
 
   React.useEffect(() => {
     if (isAuthLoading) return
-    load()
+    load({ probe: true })
     return () => abortRef.current?.abort()
   }, [isAuthLoading, load])
 
-  // Retesta ao focar a janela.
+  // Focus: catálogo em cache do server (probe=0) — não rediscobre providers.
   React.useEffect(() => {
+    let last = 0
     const onFocus = () => {
-      if (document.visibilityState === "visible" && isAuthenticated) {
-        load()
-      }
+      if (document.visibilityState !== "visible" || !isAuthenticated) return
+      const now = Date.now()
+      if (now - last < 120_000) return
+      last = now
+      load({ probe: false })
     }
     window.addEventListener("focus", onFocus)
     document.addEventListener("visibilitychange", onFocus)
@@ -132,6 +144,11 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
     }
   }, [models, selectedModelId, defaultId, isLoading])
 
+  const refreshModels = React.useCallback(
+    () => load({ probe: true }),
+    [load],
+  )
+
   const value = React.useMemo<ModelsContextValue>(
     () => ({
       models,
@@ -141,7 +158,7 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
       selectedModelId,
       selectedOffline,
       selectModel,
-      refreshModels: load,
+      refreshModels,
     }),
     [
       models,
@@ -151,7 +168,7 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
       selectedModelId,
       selectedOffline,
       selectModel,
-      load,
+      refreshModels,
     ],
   )
 

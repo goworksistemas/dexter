@@ -1,6 +1,10 @@
 // Auth helpers — password-based + recovery (docs Supabase Auth / passwords).
 import type { AuthChangeEvent, Session, User } from "@supabase/supabase-js"
 
+import {
+  assertAllowedEmail,
+  emailDomainErrorMessage,
+} from "@/lib/auth/email-domain"
 import type { UserProfile } from "@/types"
 import { hasSupabase, requireSupabase, supabase } from "./client"
 
@@ -39,6 +43,14 @@ export function mapAuthError(
   }
   if (msg.includes("signup is disabled")) {
     return "Cadastro desabilitado neste ambiente."
+  }
+  if (
+    msg.includes("gowork.com.br") ||
+    msg.includes("domínio") ||
+    msg.includes("domain") ||
+    msg.includes("email domain")
+  ) {
+    return emailDomainErrorMessage()
   }
   return error?.message || "Não foi possível concluir a autenticação."
 }
@@ -88,9 +100,10 @@ export function onAuthStateChange(
 }
 
 export async function signInWithPassword(email: string, password: string) {
+  const allowed = assertAllowedEmail(email)
   const client = requireSupabase()
   const { data, error } = await client.auth.signInWithPassword({
-    email: email.trim(),
+    email: allowed,
     password,
   })
   if (error) throw new Error(mapAuthError(error))
@@ -102,9 +115,10 @@ export async function signUpWithPassword(input: {
   password: string
   name?: string
 }) {
+  const allowed = assertAllowedEmail(input.email)
   const client = requireSupabase()
   const { data, error } = await client.auth.signUp({
-    email: input.email.trim(),
+    email: allowed,
     password: input.password,
     options: {
       emailRedirectTo: authRedirectTo("/auth/callback"),
@@ -124,8 +138,9 @@ export async function signOut() {
 }
 
 export async function resetPasswordForEmail(email: string) {
+  const allowed = assertAllowedEmail(email)
   const client = requireSupabase()
-  const { error } = await client.auth.resetPasswordForEmail(email.trim(), {
+  const { error } = await client.auth.resetPasswordForEmail(allowed, {
     redirectTo: authRedirectTo("/update-password"),
   })
   if (error) throw new Error(mapAuthError(error))

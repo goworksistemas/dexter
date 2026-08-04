@@ -3,9 +3,10 @@
  * CodeMirror com realce de sintaxe e formatação via Prettier.
  */
 import * as React from "react"
-import { AlertTriangle, Code2, Eye, Save, Sparkles, X } from "lucide-react"
+import { AlertTriangle, Code2, ExternalLink, Eye, Save, Sparkles, X } from "lucide-react"
 import { toast } from "sonner"
 
+import { HtmlPreview } from "@/components/artifacts/html-preview"
 import { Markdown } from "@/components/chat/markdown"
 import { Button } from "@/components/ui/button"
 import { useMediaQuery } from "@/hooks/use-media-query"
@@ -16,6 +17,7 @@ import {
   preloadFormatter,
   useArtifacts,
 } from "@/lib/artifacts"
+import { openArtifactTab, publishArtifactLive } from "@/lib/artifacts/live-channel"
 import { cn } from "@/lib/utils"
 
 /**
@@ -30,27 +32,9 @@ const CodeEditor = React.lazy(() =>
   loadCodeEditor().then((m) => ({ default: m.CodeEditor })),
 )
 
-function HtmlPreview({ html }: { html: string }) {
-  const srcDoc = React.useMemo(() => {
-    // Sandbox: sem scripts externos; CSP restritiva no iframe via sandbox attrs.
-    return `<!doctype html><html><head><meta charset="utf-8" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data: https: http:; font-src data:;" />
-<style>body{font-family:system-ui,sans-serif;margin:16px;color:#14181b;background:#fff} @media (prefers-color-scheme: dark){body{color:#f8f9fa;background:#0a0d0f}}</style>
-</head><body>${html}</body></html>`
-  }, [html])
-
-  return (
-    <iframe
-      title="Preview do artefato HTML"
-      sandbox=""
-      srcDoc={srcDoc}
-      className="size-full min-h-0 flex-1 rounded-lg border border-border/60 bg-background"
-    />
-  )
-}
-
 export function ArtifactPanel() {
-  const { active, isPanelOpen, closePanel, saveActive } = useArtifacts()
+  const { active, isPanelOpen, closePanel, saveActive, findBySourceKey } = useArtifacts()
+  const activeId = active ? findBySourceKey(active.sourceKey)?.id : undefined
   const [tab, setTab] = React.useState<"preview" | "code">("preview")
   const [draft, setDraft] = React.useState("")
   const [title, setTitle] = React.useState("")
@@ -115,6 +99,59 @@ export function ArtifactPanel() {
       cancelled = true
     }
   }, [active])
+
+
+  // Sync ao vivo para aba dedicada (BroadcastChannel) + autosave no DB.
+  React.useEffect(() => {
+    if (!isPanelOpen || !active || !activeId) return
+    publishArtifactLive({
+      artifactId: activeId,
+      kind: active.kind,
+      title,
+      content: draft,
+      at: Date.now(),
+    })
+  }, [active, activeId, draft, isPanelOpen, title])
+
+  React.useEffect(() => {
+    if (!isPanelOpen || !active || !activeId) return
+    const dirty = draft !== active.content || title !== active.title
+    if (!dirty || active.truncated) return
+    const t = window.setTimeout(() => {
+      void saveActive(draft, title).catch(() => {
+        /* toast só no save manual */
+      })
+    }, 900)
+    return () => window.clearTimeout(t)
+  }, [active, activeId, draft, isPanelOpen, saveActive, title])
+
+  const handleOpenTab = React.useCallback(async () => {
+    if (!active) return
+    try {
+      let id = activeId
+      if (!id) {
+        setSaving(true)
+        const saved = await saveActive(draft, title)
+        id = saved.id
+      }
+      const win = openArtifactTab(id)
+      if (!win) {
+        toast.error("O navegador bloqueou a nova aba. Permita pop-ups para o Dexter.")
+        return
+      }
+      publishArtifactLive({
+        artifactId: id,
+        kind: active.kind,
+        title,
+        content: draft,
+        at: Date.now(),
+      })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Não foi possível abrir a aba.")
+    } finally {
+      setSaving(false)
+    }
+  }, [active, activeId, draft, saveActive, title])
 
   const handleSave = React.useCallback(async () => {
     setSaving(true)
@@ -245,6 +282,19 @@ export function ArtifactPanel() {
             <Button
               type="button"
               size="sm"
+              variant="ghost"
+              className="h-10 gap-1.5 rounded-lg lg:h-8"
+              title="Abrir em aba dedicada (atualiza ao vivo)"
+              aria-label="Abrir em aba dedicada"
+              disabled={saving}
+              onClick={() => void handleOpenTab()}
+            >
+              <ExternalLink className="size-4 lg:size-3.5" />
+              <span className="hidden sm:inline">Nova aba</span>
+            </Button>
+            <Button
+              type="button"
+              size="sm"
               className="h-10 gap-1.5 rounded-lg lg:h-8"
               title="Salvar (Ctrl/Cmd+S)"
               disabled={!dirty || saving}
@@ -298,7 +348,7 @@ export function ArtifactPanel() {
       </div>
 
       <p className="hidden shrink-0 px-3 pb-2.5 text-[11px] text-muted-foreground lg:block">
-        Shift+Alt+F formata · Tab indenta · Ctrl/Cmd+S salva · versões salvas no Supabase
+        Shift+Alt+F formata · Ctrl/Cmd+S salva · Nova aba sincroniza ao vivo
       </p>
     </aside>
   )

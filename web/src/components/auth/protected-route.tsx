@@ -1,10 +1,11 @@
 import { Navigate, Outlet, useLocation } from "react-router-dom"
 
+import { emailDomainErrorMessage, isAllowedEmail } from "@/lib/auth/email-domain"
 import { useAuth } from "@/providers/auth-provider"
 
 /** Exige sessão Supabase. Sem auth configurado, bloqueia com tela de setup. */
 export function ProtectedRoute() {
-  const { isAuthenticated, isLoading, isConfigured } = useAuth()
+  const { isAuthenticated, isLoading, isConfigured, user, signOut } = useAuth()
   const location = useLocation()
 
   if (isLoading) {
@@ -32,6 +33,47 @@ export function ProtectedRoute() {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />
+  }
+
+  if (!isAllowedEmail(user?.email)) {
+    return (
+      <div className="flex h-dvh flex-col items-center justify-center gap-3 bg-background px-6 text-center">
+        <p className="text-base font-medium text-foreground">
+          Domínio não autorizado
+        </p>
+        <p className="max-w-md text-sm text-muted-foreground">
+          {emailDomainErrorMessage()}
+        </p>
+        <button
+          type="button"
+          className="text-sm font-medium text-primary hover:underline"
+          onClick={() => void signOut()}
+        >
+          Sair
+        </button>
+      </div>
+    )
+  }
+
+  if (user?.disabledAt) {
+    return (
+      <div className="flex h-dvh flex-col items-center justify-center gap-3 bg-background px-6 text-center">
+        <p className="text-base font-medium text-foreground">
+          Conta desativada
+        </p>
+        <p className="max-w-md text-sm text-muted-foreground">
+          Seu acesso ao Dexter foi revogado. Fale com um administrador
+          (bpm@gowork.com.br).
+        </p>
+        <button
+          type="button"
+          className="text-sm font-medium text-primary hover:underline"
+          onClick={() => void signOut()}
+        >
+          Sair
+        </button>
+      </div>
+    )
   }
 
   return <Outlet />

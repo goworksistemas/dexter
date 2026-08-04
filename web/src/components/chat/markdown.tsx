@@ -2,14 +2,52 @@
  * Renderizador de markdown para respostas do assistente.
  * Blocos ```html / ```md / ```markdown ganham ação "Abrir artefato".
  */
-import { memo, useMemo, type ReactNode } from "react"
+import {
+  memo,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react"
 import { PanelRightOpen } from "lucide-react"
-import ReactMarkdown, { type Components } from "react-markdown"
+import ReactMarkdown, {
+  defaultUrlTransform,
+  type Components,
+} from "react-markdown"
 import rehypeHighlight from "rehype-highlight"
 import remarkGfm from "remark-gfm"
 
+import { MessageImage } from "@/components/chat/message-image"
 import { detectArtifactBlocks, type DetectedArtifactBlock } from "@/lib/artifacts"
 import { cn } from "@/lib/utils"
+
+const DATA_IMAGE_MD =
+  /!\[([^\]]*)\]\((data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+)\)/gi
+
+/** Tira data URLs enormes do markdown antes do parser (evita travar o main thread). */
+function extractInlineDataImages(content: string): {
+  markdown: string
+  images: string[]
+} {
+  const images: string[] = []
+  const markdown = content.replace(DATA_IMAGE_MD, (_full, alt: string, dataUrl: string) => {
+    const idx = images.length
+    images.push(dataUrl.replace(/\s+/g, ""))
+    return `![${alt}](dexter-img://${idx})`
+  })
+  return { markdown, images }
+}
+
+function markdownUrlTransform(url: string, images: string[]): string {
+  if (url.startsWith("dexter-img://")) {
+    const idx = Number(url.slice("dexter-img://".length))
+    return images[idx] || ""
+  }
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(url)) return url
+  return defaultUrlTransform(url)
+}
 
 function isBlockCode(className?: string): boolean {
   return /(?:^|\s)(language-|hljs)/.test(className ?? "")
@@ -43,6 +81,7 @@ function isArtifactLang(lang: string | null): lang is "html" | "htm" | "markdown
 
 function buildComponents(
   onOpenArtifact?: (block: DetectedArtifactBlock) => void,
+  images: string[] = [],
 ): Components {
   return {
     h1: ({ className, ...props }) => (
@@ -161,13 +200,22 @@ function buildComponents(
     del: ({ className, ...props }) => (
       <del className={cn("text-muted-foreground/80", className)} {...props} />
     ),
-    img: ({ className, ...props }) => (
-      // eslint-disable-next-line jsx-a11y/alt-text
-      <img
-        className={cn("my-2 max-w-full rounded-lg border border-border/60", className)}
-        {...props}
-      />
-    ),
+    img: ({ className, src, alt, title }) => {
+      let resolved = typeof src === "string" ? src : ""
+      if (resolved.startsWith("dexter-img://")) {
+        const idx = Number(resolved.slice("dexter-img://".length))
+        resolved = images[idx] || ""
+      }
+      if (!resolved) return null
+      return (
+        <MessageImage
+          src={resolved}
+          alt={typeof alt === "string" ? alt : undefined}
+          title={typeof title === "string" ? title : undefined}
+          className={className}
+        />
+      )
+    },
     table: ({ className, ...props }) => (
       <div className="my-3 overflow-x-auto rounded-lg border border-border">
         <table className={cn("w-full border-collapse text-sm", className)} {...props} />
@@ -276,35 +324,97 @@ function buildComponents(
   }
 }
 
+/** Cap de reparse markdown durante stream (~10 fps). Acima disso o main thread morre. */
+const STREAM_MARKDOWN_MS = 100
+
+function useStreamingContent(content: string, streaming: boolean): string {
+  const deferred = useDeferredValue(content)
+  const [throttled, setThrottled] = useState(content)
+  const lastFlush = useRef(0)
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    if (!streaming) {
+      if (timer.current) {
+        clearTimeout(timer.current)
+        timer.current = null
+      }
+      setThrottled(content)
+      lastFlush.current = 0
+      return
+    }
+
+    const now = Date.now()
+    const wait = STREAM_MARKDOWN_MS - (now - lastFlush.current)
+    if (wait <= 0) {
+      lastFlush.current = now
+      setThrottled(deferred)
+      return
+    }
+    if (timer.current) clearTimeout(timer.current)
+    timer.current = setTimeout(() => {
+      timer.current = null
+      lastFlush.current = Date.now()
+      setThrottled(deferred)
+    }, wait)
+    return () => {
+      if (timer.current) {
+        clearTimeout(timer.current)
+        timer.current = null
+      }
+    }
+  }, [content, deferred, streaming])
+
+  return streaming ? throttled : content
+}
+
 interface MarkdownProps {
   content: string
   className?: string
+  /** Durante o stream: sem syntax highlight + reparse limitado (menos jank). */
+  streaming?: boolean
   onOpenArtifact?: (block: DetectedArtifactBlock) => void
 }
 
 export const Markdown = memo(function Markdown({
   content,
   className,
+  streaming = false,
   onOpenArtifact,
 }: MarkdownProps) {
+  const renderContent = useStreamingContent(content, streaming)
+  const { markdown, images } = useMemo(
+    () => extractInlineDataImages(renderContent),
+    [renderContent],
+  )
   const components = useMemo(
-    () => buildComponents(onOpenArtifact),
-    [onOpenArtifact],
+    () => buildComponents(streaming ? undefined : onOpenArtifact, images),
+    [streaming, onOpenArtifact, images],
+  )
+  const urlTransform = useMemo(
+    () => (url: string) => markdownUrlTransform(url, images),
+    [images],
+  )
+  const rehypePlugins = useMemo(
+    () => (streaming ? [] : [rehypeHighlight]),
+    [streaming],
   )
 
   return (
     <div
       className={cn(
         "markdown-body min-w-0 text-sm break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+        streaming && "markdown-streaming",
         className,
       )}
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        rehypePlugins={rehypePlugins}
+        urlTransform={urlTransform}
         components={components}
       >
-        {content}
+        {markdown}
       </ReactMarkdown>
     </div>
   )

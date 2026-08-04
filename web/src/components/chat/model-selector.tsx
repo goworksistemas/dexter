@@ -1,26 +1,60 @@
 /**
- * Seletor de modelo de IA — só lista modelos online (`available: true`).
- * Se nenhum passar no probe: desabilitado + "Nenhum modelo online" + retestar.
+ * Seletor de modelo — estilo Claude, no composer.
+ * Tags de capacidade: Visão, Arquivos, Gerar imagem.
  */
-import { AlertCircle, Check, ChevronDown, RefreshCw, Sparkles } from "lucide-react"
+import {
+  AlertCircle,
+  Check,
+  ChevronDown,
+  RefreshCw,
+} from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
-import { useModels } from "@/lib/models"
-import type { ModelProvider } from "@/lib/models"
+import { useModels, modelCaps } from "@/lib/models"
+import { cn } from "@/lib/utils"
 
-function rotuloProvider(provider: ModelProvider): string {
-  return provider === "anthropic" ? "Claude" : "Self-hosted"
+function CapChips({
+  vision,
+  files,
+  imageGeneration,
+}: {
+  vision: boolean
+  files: boolean
+  imageGeneration: boolean
+}) {
+  const chips: string[] = []
+  if (vision) chips.push("Visão")
+  if (files) chips.push("Arquivos")
+  if (imageGeneration) chips.push("Gerar imagem")
+  if (!chips.length) return null
+  return (
+    <span className="mt-1.5 flex flex-wrap gap-1">
+      {chips.map((c) => (
+        <span
+          key={c}
+          className="rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+        >
+          {c}
+        </span>
+      ))}
+    </span>
+  )
 }
 
-export function ModelSelector() {
+export function ModelSelector({
+  className,
+  align = "end",
+}: {
+  className?: string
+  align?: "start" | "center" | "end"
+}) {
   const {
     models,
     isLoading,
@@ -36,22 +70,25 @@ export function ModelSelector() {
 
   if (nenhumOnline || error) {
     return (
-      <div className="flex items-center gap-1">
+      <div className={cn("flex items-center gap-0.5", className)}>
         <Button
+          type="button"
           variant="ghost"
           size="sm"
-          className="gap-1.5 rounded-lg text-muted-foreground"
+          className="h-8 gap-1 rounded-lg px-2 text-xs text-muted-foreground"
           disabled
           aria-label="Nenhum modelo online"
         >
-          <AlertCircle className="size-4 text-destructive" />
-          <span className="max-w-40 truncate">
-            {error ? "Erro ao listar" : "Nenhum modelo online"}
+          <AlertCircle className="size-3.5 text-destructive" />
+          <span className="max-w-28 truncate">
+            {error ? "Erro" : "Offline"}
           </span>
         </Button>
         <Button
+          type="button"
           variant="ghost"
           size="icon-sm"
+          className="size-8"
           aria-label="Retestar modelos"
           onClick={() => refreshModels()}
           disabled={isLoading}
@@ -63,54 +100,71 @@ export function ModelSelector() {
   }
 
   return (
-    <div className="flex items-center gap-0.5">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="gap-1.5 rounded-lg text-muted-foreground disabled:opacity-50"
-            disabled={isLoading || models.length === 0}
-            aria-label="Selecionar modelo de IA"
-          >
-            <Sparkles className="size-4" />
-            <span className="max-w-32 truncate">
-              {isLoading ? "Modelo" : (modeloAtivo?.label ?? "Modelo")}
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className={cn(
+            "h-8 max-w-[11rem] gap-1 rounded-lg px-2 text-xs font-medium text-muted-foreground hover:text-foreground",
+            className,
+          )}
+          disabled={isLoading || models.length === 0}
+          aria-label="Selecionar modelo de IA"
+        >
+          <span className="truncate">
+            {isLoading ? "Modelo" : (modeloAtivo?.label ?? "Modelo")}
+          </span>
+          {selectedOffline ? (
+            <span className="text-[10px] text-amber-600 dark:text-amber-400">
+              ·
             </span>
-            {selectedOffline ? (
-              <span className="text-[10px] text-amber-600 dark:text-amber-400">
-                offline
-              </span>
-            ) : null}
-            <ChevronDown className="size-3.5" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuLabel>Modelo de IA</DropdownMenuLabel>
-          <DropdownMenuSeparator />
-          {models.map((model) => (
-            <DropdownMenuItem key={model.id} onSelect={() => selectModel(model.id)}>
-              <Check
-                className={
-                  model.id === selectedModelId ? "size-4 opacity-100" : "size-4 opacity-0"
-                }
-              />
-              <span className="flex min-w-0 flex-1 flex-col">
-                <span className="truncate">{model.label}</span>
-                <span className="text-xs text-muted-foreground">
-                  {rotuloProvider(model.provider)}
-                  {model.latencyMs != null ? ` · ${model.latencyMs}ms` : ""}
+          ) : null}
+          <ChevronDown className="size-3.5 shrink-0 opacity-70" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align={align}
+        side="top"
+        sideOffset={8}
+        className="w-[min(22rem,calc(100vw-2rem))]"
+      >
+        {models.map((model) => {
+          const selected = model.id === selectedModelId
+          const caps = modelCaps(model)
+          return (
+            <DropdownMenuItem
+              key={model.id}
+              onSelect={() => selectModel(model.id)}
+              className="items-start gap-3 py-2.5"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium text-foreground">
+                  {model.label}
                 </span>
+                {model.description ? (
+                  <span className="mt-0.5 block text-xs leading-snug text-muted-foreground">
+                    {model.description}
+                  </span>
+                ) : null}
+                <CapChips {...caps} />
               </span>
+              <Check
+                className={cn(
+                  "mt-0.5 size-4 shrink-0 text-primary",
+                  selected ? "opacity-100" : "opacity-0",
+                )}
+              />
             </DropdownMenuItem>
-          ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => refreshModels()}>
-            <RefreshCw className="size-4" />
-            Retestar
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
+          )
+        })}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => refreshModels()}>
+          <RefreshCw className="size-4" />
+          Retestar disponibilidade
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }

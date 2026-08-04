@@ -77,6 +77,9 @@ export class ChatRunsStore {
   private readonly listeners = new Set<Listener>()
   private readonly lastActivityAt = new Map<string, number>()
   private readonly stallTimers = new Map<string, ReturnType<typeof setInterval>>()
+  /** Texto do assistente pendente de flush pra UI (coalescido por rAF). */
+  private readonly pendingText = new Map<string, string>()
+  private readonly textFlushRaf = new Map<string, number>()
   private transport: ChatTransport
   private onRunSettled: ((chatId: string) => void) | null = null
 
@@ -127,8 +130,21 @@ export class ChatRunsStore {
   }
 
   cancelRun(chatId: string): void {
+    const run = this.runs.get(chatId)
     const controller = this.controllers.get(chatId)
-    if (controller) controller.abort()
+
+    // Encerra a UI na hora — não espera o SSE/reader desenrolar (senão a
+    // bolha fica status "running" pra sempre se o sync ignorar o settle).
+    if (run?.status === "running") {
+      const texto = this.pendingText.get(chatId) ?? run.assistantText
+      this.cancelTextUi(chatId)
+      this.settle(chatId, run.assistantMessageId, {
+        assistantText: texto,
+        status: "cancelled",
+      })
+    }
+
+    controller?.abort()
   }
 
   /**
@@ -142,6 +158,7 @@ export class ChatRunsStore {
       this.controllers.delete(params.chatId)
     }
     this.clearStall(params.chatId)
+    this.cancelTextUi(params.chatId)
 
     const assistantMessageId = crypto.randomUUID()
     const messages: ChatRunMessage[] = params.messages.map((m) => ({
@@ -214,6 +231,7 @@ export class ChatRunsStore {
       if (idle >= STALL_FAIL_MS) {
         const msg =
           "Sem resposta do servidor há 3 minutos. A geração foi interrompida — toque em Tentar novamente."
+        this.cancelTextUi(chatId)
         this.updateRunFor(chatId, assistantMessageId, {
           assistantText: run.assistantText
             ? `${run.assistantText}\n\n_${msg}_`
@@ -312,12 +330,54 @@ export class ChatRunsStore {
     })
   }
 
+  /** Empurra texto parcial no máximo 1x por frame — evita reparse markdown a cada token. */
+  private scheduleTextUi(
+    chatId: string,
+    assistantMessageId: string,
+    texto: string,
+  ): void {
+    this.pendingText.set(chatId, texto)
+    if (this.textFlushRaf.has(chatId)) return
+    const raf =
+      typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame(() => {
+            this.textFlushRaf.delete(chatId)
+            this.flushPendingText(chatId, assistantMessageId)
+          })
+        : (setTimeout(() => {
+            this.textFlushRaf.delete(chatId)
+            this.flushPendingText(chatId, assistantMessageId)
+          }, 16) as unknown as number)
+    this.textFlushRaf.set(chatId, raf)
+  }
+
+  private flushPendingText(
+    chatId: string,
+    assistantMessageId: string,
+  ): void {
+    const texto = this.pendingText.get(chatId)
+    if (texto === undefined) return
+    this.pendingText.delete(chatId)
+    this.updateRunFor(chatId, assistantMessageId, { assistantText: texto })
+  }
+
+  private cancelTextUi(chatId: string): void {
+    const raf = this.textFlushRaf.get(chatId)
+    if (raf !== undefined) {
+      if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(raf)
+      else clearTimeout(raf)
+      this.textFlushRaf.delete(chatId)
+    }
+    this.pendingText.delete(chatId)
+  }
+
   private settle(
     chatId: string,
     assistantMessageId: string,
     patch: Partial<ChatRunSnapshot> & { assistantText?: string },
   ): void {
     if (!this.isCurrent(chatId, assistantMessageId)) return
+    this.cancelTextUi(chatId)
     this.updateRunFor(chatId, assistantMessageId, patch)
     if (this.controllers.get(chatId)?.signal.aborted !== undefined) {
       // remove só se ainda for o controller deste run
@@ -374,6 +434,8 @@ export class ChatRunsStore {
         signal,
       )) {
         if (!this.isCurrent(chatId, assistantMessageId)) return
+        // Parar já settled — descarta o resto do SSE.
+        if (this.runs.get(chatId)?.status !== "running") return
         this.touchActivity(chatId)
 
         if (chunk.type === "heartbeat") {
@@ -381,7 +443,7 @@ export class ChatRunsStore {
           continue
         } else if (chunk.type === "text-delta") {
           texto += chunk.textDelta
-          this.updateRunFor(chatId, assistantMessageId, { assistantText: texto })
+          this.scheduleTextUi(chatId, assistantMessageId, texto)
         } else if (chunk.type === "progress") {
           this.applyProgress(chatId, assistantMessageId, chunk.event)
         } else if (chunk.type === "error") {
@@ -404,6 +466,8 @@ export class ChatRunsStore {
       }
 
       if (!this.isCurrent(chatId, assistantMessageId)) return
+      // cancelRun já pode ter settled — não sobrescreve.
+      if (this.runs.get(chatId)?.status !== "running") return
 
       if (signal.aborted) {
         this.settle(chatId, assistantMessageId, {
@@ -419,6 +483,7 @@ export class ChatRunsStore {
       }
     } catch (err) {
       if (!this.isCurrent(chatId, assistantMessageId)) return
+      if (this.runs.get(chatId)?.status !== "running") return
       if (signal.aborted) {
         this.settle(chatId, assistantMessageId, {
           assistantText: texto,

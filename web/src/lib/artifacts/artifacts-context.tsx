@@ -11,10 +11,12 @@ import {
   markArtifactTruncated,
   upsertArtifact,
 } from "./api"
+import { publishArtifactLive } from "./live-channel"
 import {
   looksTruncated,
   selectArtifactsForContext,
 } from "./context-inject"
+import { stableSourceKey } from "./parse"
 import type { AgentArtifact, ArtifactKind, DetectedArtifactBlock } from "./types"
 
 export type OpenArtifactInput = {
@@ -41,6 +43,7 @@ interface ArtifactsContextValue {
     title: string
     content: string
     version: number
+    is_truncated?: boolean
   }>
   findBySourceKey: (sourceKey: string) => AgentArtifact | undefined
   ensureFromBlock: (
@@ -93,18 +96,36 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
   }, [chatId])
 
   const findBySourceKey = React.useCallback(
-    (sourceKey: string) => artifacts.find((a) => a.source_key === sourceKey),
+    (sourceKey: string) => {
+      const exact = artifacts.find((a) => a.source_key === sourceKey)
+      if (exact) return exact
+      // Compat: kind:current ↔ source_key legado (hash).
+      if (sourceKey.endsWith(":current")) {
+        const kind = sourceKey.slice(0, -":current".length) as ArtifactKind
+        return artifacts
+          .filter((a) => a.kind === kind)
+          .sort((a, b) => b.version - a.version)[0]
+      }
+      return undefined
+    },
     [artifacts],
   )
 
   const openArtifact = React.useCallback(
     (input: OpenArtifactInput) => {
-      const existing = artifacts.find((a) => a.source_key === input.sourceKey)
+      const existing =
+        artifacts.find((a) => a.source_key === input.sourceKey) ??
+        artifacts
+          .filter((a) => a.kind === input.kind)
+          .sort((a, b) => b.version - a.version)[0]
       setActive({
         ...input,
-        content: existing?.content ?? input.content,
-        title: existing?.title ?? input.title,
-        kind: existing?.kind ?? input.kind,
+        // Caller (ensureFromBlock pós-upsert) é autoritativo — não usar
+        // existing.content do state stale, que apagaria a edição nova.
+        sourceKey: existing?.source_key ?? input.sourceKey,
+        content: input.content,
+        title: input.title || existing?.title || input.title,
+        kind: input.kind,
       })
       setIsPanelOpen(true)
     },
@@ -141,6 +162,14 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
             }
           : prev,
       )
+      publishArtifactLive({
+        artifactId: saved.id,
+        kind: saved.kind,
+        title: saved.title ?? active.title,
+        content: saved.content,
+        version: saved.version,
+        at: Date.now(),
+      })
       return saved
     },
     [active, chatId],
@@ -150,15 +179,27 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
     async (block: DetectedArtifactBlock, messageId?: string | null) => {
       if (!chatId) return
 
-      // Truncado: NÃO versiona como artefato válido — só abre o painel local
-      // se ainda não houver um completo do mesmo kind.
-      if (block.truncated || looksTruncated(block.kind, block.content)) {
-        const completo = artifacts.find(
-          (a) =>
-            a.kind === block.kind &&
-            !a.is_truncated &&
-            !looksTruncated(a.kind, a.content),
-        )
+      // Um artefato ativo por kind: reusa source_key legado ou kind:current.
+      const sameKind = artifacts
+        .filter((a) => a.kind === block.kind)
+        .sort((a, b) => {
+          if (b.version !== a.version) return b.version - a.version
+          return Date.parse(b.updated_at) - Date.parse(a.updated_at)
+        })[0]
+      const sourceKey =
+        sameKind?.source_key ?? block.sourceKey ?? stableSourceKey(block.kind)
+      const incomplete =
+        Boolean(block.truncated) || looksTruncated(block.kind, block.content)
+
+      // Truncado: não sobrescreve um completo válido; persiste incompleto
+      // só se ainda não houver versão completa do mesmo kind (p/ o prompt).
+      if (incomplete) {
+        const completo =
+          sameKind &&
+          !sameKind.is_truncated &&
+          !looksTruncated(sameKind.kind, sameKind.content)
+            ? sameKind
+            : null
         if (completo) {
           openArtifact({
             sourceKey: completo.source_key,
@@ -170,43 +211,40 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
           })
           return
         }
-        openArtifact({
-          sourceKey: block.sourceKey,
-          kind: block.kind,
-          title: block.title,
-          content: block.content,
-          messageId,
-          truncated: true,
-        })
+        try {
+          const saved = await upsertArtifact({
+            chatId,
+            sourceKey,
+            kind: block.kind,
+            title: block.title,
+            content: block.content,
+            messageId,
+            isTruncated: true,
+          })
+          setArtifacts((prev) => [saved, ...prev.filter((a) => a.id !== saved.id)])
+          openArtifact({
+            sourceKey: saved.source_key,
+            kind: saved.kind,
+            title: saved.title ?? block.title,
+            content: saved.content,
+            messageId: saved.message_id ?? messageId,
+            truncated: true,
+          })
+        } catch (err) {
+          console.warn("Artefato truncado local:", err)
+          openArtifact({
+            sourceKey,
+            kind: block.kind,
+            title: block.title,
+            content: block.content,
+            messageId,
+            truncated: true,
+          })
+        }
         return
       }
 
-      const existingSameKey = artifacts.find(
-        (a) => a.source_key === block.sourceKey,
-      )
-      if (existingSameKey) {
-        openArtifact({
-          sourceKey: existingSameKey.source_key,
-          kind: existingSameKey.kind,
-          title: existingSameKey.title ?? block.title,
-          content: existingSameKey.content,
-          messageId: existingSameKey.message_id ?? messageId,
-          truncated: false,
-        })
-        return
-      }
-
-      // Regeneração com hash diferente: atualiza o artefato mais recente do
-      // mesmo kind (evita v1/v1/v2 paralelos no prompt).
-      const sameKind = artifacts
-        .filter((a) => a.kind === block.kind && !a.is_truncated)
-        .sort((a, b) => {
-          if (b.version !== a.version) return b.version - a.version
-          return Date.parse(b.updated_at) - Date.parse(a.updated_at)
-        })[0]
-
-      const sourceKey = sameKind?.source_key ?? block.sourceKey
-
+      // Completo: sempre upsert no mesmo source_key/kind (edição in-place).
       try {
         const saved = await upsertArtifact({
           chatId,
@@ -218,6 +256,14 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
           isTruncated: false,
         })
         setArtifacts((prev) => [saved, ...prev.filter((a) => a.id !== saved.id)])
+        publishArtifactLive({
+          artifactId: saved.id,
+          kind: saved.kind,
+          title: saved.title ?? block.title,
+          content: saved.content,
+          version: saved.version,
+          at: Date.now(),
+        })
         openArtifact({
           sourceKey: saved.source_key,
           kind: saved.kind,
@@ -229,7 +275,7 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
       } catch (err) {
         console.warn("Artefato local (chat ainda sem persistência):", err)
         openArtifact({
-          sourceKey: block.sourceKey,
+          sourceKey,
           kind: block.kind,
           title: block.title,
           content: block.content,
@@ -242,7 +288,7 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
   )
 
   const getContextArtifacts = React.useCallback(() => {
-    // Só a versão atual por kind; sem truncados; content já limitado.
+    // Versão atual por kind (inclui incompletos marcados p/ o modelo completar).
     return selectArtifactsForContext(
       artifacts.map((a) => ({
         id: a.id,
@@ -258,6 +304,7 @@ export function ArtifactsProvider({ children }: { children: React.ReactNode }) {
       title: a.title,
       content: a.content,
       version: a.version,
+      is_truncated: a.is_truncated,
     }))
   }, [artifacts])
 

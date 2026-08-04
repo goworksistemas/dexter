@@ -11,7 +11,7 @@ import type Anthropic from "@anthropic-ai/sdk"
 
 import { config } from "../config.js"
 import { streamChat, type LlmMessage } from "../llm/router.js"
-import { resolveModel } from "../llm/models.js"
+import { enabledModels, resolveModel } from "../llm/models.js"
 import { endSSE, initSSE, writeSSE, writeSSEHeartbeat } from "../lib/sse.js"
 import { DEXTER_SYSTEM_PROMPT } from "../llm/system-prompt.js"
 import { resolveUser } from "../services/auth.js"
@@ -22,6 +22,11 @@ import {
   upsertChat,
 } from "../services/chat-store.js"
 import { buildProjectPromptBlock } from "../services/project-store.js"
+import {
+  connectorsPromptBlock,
+  resolveConnectorRuntime,
+} from "../connectors/status.js"
+import type { ConnectorRuntime } from "../connectors/types.js"
 import { resolveAccess, accessSummary, type SystemAccess } from "../systems/access.js"
 import {
   formatArtifactsSystemBlock,
@@ -29,7 +34,25 @@ import {
   type ArtifactWire,
 } from "../systems/artifacts-context.js"
 import { runAgentLoop, type ToolCallRecord } from "../systems/agent-loop.js"
+import { runOpenAiAgentLoop } from "../systems/openai-agent-loop.js"
 import { auditToolCall } from "../systems/audit.js"
+import { isOpenAiCompatibleProvider } from "../lib/openai-compatible.js"
+import { persistChatImageUrl } from "../lib/chat-images.js"
+import { generateImageGemini, generateImageOpenAI } from "../lib/images.js"
+import {
+  classifyImageIntent,
+  enrichImagePrompt,
+  isImageOutputRequest,
+  listChatModels,
+  listImageGenModels,
+  replyNeedImageModel,
+  replyOnImageModelButChat,
+} from "../lib/image-intent.js"
+import {
+  isImageGenerationModel,
+  modelAllowsFiles,
+  modelAllowsVision,
+} from "../llm/capabilities.js"
 
 const attachmentSchema = z.object({
   type: z.enum(["image", "document"]),
@@ -79,6 +102,7 @@ function buildSystemPrompt(
   access: SystemAccess[],
   projectBlock: string | null,
   artifactsBlock: string | null,
+  connectors?: ConnectorRuntime,
 ): string {
   let prompt = DEXTER_SYSTEM_PROMPT
   if (context?.system) {
@@ -102,6 +126,9 @@ function buildSystemPrompt(
     "- NUNCA invente números, valores ou listas — só afirme o que as tools retornarem.\n" +
     "- Se a tool retornar erro de acesso, ou o usuário perguntar sobre um sistema que ele NÃO acessa, diga que ele não tem acesso àquele dado.\n" +
     "- Responda em português, de forma objetiva."
+  if (connectors) {
+    prompt += connectorsPromptBlock(connectors)
+  }
   return prompt
 }
 
@@ -162,6 +189,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     // Preflight de acesso: o que este usuário (por email) enxerga em cada
     // sistema. Vazio se não houver email ou nenhum sistema configurado.
     const access = email ? await resolveAccess(email) : []
+    const connectors = await resolveConnectorRuntime(userId)
 
     // Se ainda não há mensagens no chat, é uma conversa nova — usa a 1ª
     // mensagem do usuário (truncada) como título.
@@ -225,10 +253,54 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       access,
       projectBlock,
       artifactsBlock,
+      connectors,
     )
 
-    // Modelo escolhido na interface (context.model) — cai no default se ausente.
-    const modelInfo = resolveModel(body.context?.model)
+    // Modelo escolhido na interface (context.model) — catálogo admin + default.
+    const modelInfo = await resolveModel(body.context?.model)
+
+    const lastAttachments = lastMessage.attachments ?? []
+    if (lastAttachments.length > 0) {
+      const wantsImage = lastAttachments.some((a) => a.type === "image")
+      const wantsFile = lastAttachments.some((a) => a.type === "document")
+      const imageGen = isImageGenerationModel(
+        modelInfo.provider,
+        modelInfo.model,
+      )
+      // Geração com referência usa a mesma tag Visão (Nano Banana / gpt-image).
+      if (
+        wantsImage &&
+        !modelAllowsVision(
+          modelInfo.provider,
+          modelInfo.model,
+          modelInfo.capabilities,
+        )
+      ) {
+        reply.code(400).send({
+          error: "model_no_vision",
+          message: imageGen
+            ? "Este modelo de imagem não aceita referência. Use Nano Banana / gpt-image ou gere só com texto."
+            : "Este modelo não analisa imagens. Escolha um com a tag Visão.",
+        })
+        return
+      }
+      if (
+        wantsFile &&
+        !modelAllowsFiles(
+          modelInfo.provider,
+          modelInfo.model,
+          modelInfo.capabilities,
+        )
+      ) {
+        reply.code(400).send({
+          error: "model_no_files",
+          message: imageGen
+            ? "Modelos de geração de imagem aceitam só imagens de referência (não PDF)."
+            : "Este modelo não lê arquivos/PDF. Escolha um com a tag Arquivos.",
+        })
+        return
+      }
+    }
 
     initSSE(reply)
 
@@ -275,32 +347,148 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       let tokensOut: number | undefined
       const toolCalls: ToolCallRecord[] = []
 
-      if (modelInfo.provider === "anthropic") {
-        // Caminho com tools: o Claude pode consultar os sistemas via RPCs
-        // read-only com gate. O backend injeta o email do usuário autenticado
-        // em cada chamada — o LLM nunca escolhe de quem é o dado.
+      const onToolCallEmit = (rec: ToolCallRecord): void => {
+        toolCalls.push(rec)
+        emit({
+          event: "tool-call",
+          data: {
+            toolCallId: rec.toolName,
+            toolName: rec.fn ?? rec.toolName,
+            args: rec.input,
+          },
+        })
+      }
+
+      const userPrompt = stripArtifactAppendix(lastMessage.content).trim()
+      const references = lastAttachments
+        .filter((a) => a.type === "image")
+        .map((a) => ({
+          mediaType: a.mediaType,
+          dataBase64: a.dataBase64,
+          name: a.name,
+        }))
+      const imageIntent = classifyImageIntent(userPrompt, {
+        hasImageReferences: references.length > 0,
+      })
+      const onImageModel = isImageGenerationModel(
+        modelInfo.provider,
+        modelInfo.model,
+      )
+
+      // Modelo de imagem: só gera se a intenção for gerar/editar (evita gastar cota).
+      if (onImageModel) {
+        if (imageIntent.intent !== "generate") {
+          emit({
+            event: "progress",
+            data: { type: "status", text: "Interpretando pedido" },
+          })
+          const catalog = await enabledModels()
+          fullText = replyOnImageModelButChat(
+            modelInfo.label,
+            listChatModels(catalog),
+            imageIntent,
+          )
+          emit({ event: "text-delta", data: { textDelta: fullText } })
+          endReason = "ok"
+        } else {
+          emit({
+            event: "progress",
+            data: {
+              type: "status",
+              text:
+                references.length > 0 ? "Editando com referência" : "Gerando imagem",
+            },
+          })
+          const prompt = enrichImagePrompt(userPrompt || "Gere uma imagem.")
+          const img =
+            modelInfo.provider === "gemini"
+              ? await generateImageGemini({
+                  model: modelInfo.model,
+                  prompt,
+                  references,
+                  signal: controller.signal,
+                })
+              : await generateImageOpenAI({
+                  model: modelInfo.model,
+                  prompt,
+                  references,
+                  signal: controller.signal,
+                })
+          usedModel = img.model
+          const storedUrl = await persistChatImageUrl({
+            userId,
+            chatId: body.threadId,
+            imageUrl: img.imageUrl,
+          })
+          const preface = [
+            img.revisedPrompt ? `*Prompt revisado:* ${img.revisedPrompt}` : "",
+            img.text?.trim() || "",
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+          fullText =
+            (preface ? `${preface}\n\n` : "") +
+            `![imagem gerada](${storedUrl})`
+          emit({ event: "text-delta", data: { textDelta: fullText } })
+          endReason = "ok"
+        }
+      } else if (
+        isImageOutputRequest(userPrompt, {
+          hasImageReferences: references.length > 0,
+        })
+      ) {
+        // Chat model + pedido claro de imagem: orientar (não alucinar).
+        emit({
+          event: "progress",
+          data: { type: "status", text: "Verificando modelos de imagem" },
+        })
+        const catalog = await enabledModels()
+        fullText = replyNeedImageModel(
+          modelInfo.label,
+          listImageGenModels(catalog),
+          userPrompt,
+        )
+        emit({ event: "text-delta", data: { textDelta: fullText } })
+        endReason = "ok"
+      } else if (modelInfo.provider === "anthropic") {
         const result = await runAgentLoop({
           model: modelInfo.model,
           systemPrompt,
           messages: toAnthropicMessages(body.messages),
           access,
+          connectors,
+          userId,
           email: email ?? "",
           signal: controller.signal,
           onTextDelta: (t) => {
             fullText += t
             emit({ event: "text-delta", data: { textDelta: t } })
           },
-          onToolCall: (rec) => {
-            toolCalls.push(rec)
-            emit({
-              event: "tool-call",
-              data: {
-                toolCallId: rec.toolName,
-                toolName: rec.fn ?? rec.toolName,
-                args: rec.input,
-              },
-            })
+          onToolCall: onToolCallEmit,
+          onProgress: (evt) => emit({ event: "progress", data: evt }),
+        })
+        usedModel = result.model
+        tokensIn = result.inputTokens
+        tokensOut = result.outputTokens
+        endReason = result.endReason
+        steps = result.steps
+      } else if (isOpenAiCompatibleProvider(modelInfo.provider)) {
+        const result = await runOpenAiAgentLoop({
+          provider: modelInfo.provider,
+          model: modelInfo.model,
+          systemPrompt,
+          messages: llmMessages,
+          attachments: lastAttachments,
+          access,
+          connectors,
+          userId,
+          email: email ?? "",
+          signal: controller.signal,
+          onTextDelta: (t) => {
+            fullText += t
+            emit({ event: "text-delta", data: { textDelta: t } })
           },
+          onToolCall: onToolCallEmit,
           onProgress: (evt) => emit({ event: "progress", data: evt }),
         })
         usedModel = result.model
@@ -309,8 +497,11 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         endReason = result.endReason
         steps = result.steps
       } else {
-        // Provider sem tools (ex.: self-hosted) — streaming simples.
-        emit({ event: "progress", data: { type: "status", text: "Gerando resposta" } })
+        // Ollama — streaming simples (sem tools Anthropic/OpenAI).
+        emit({
+          event: "progress",
+          data: { type: "status", text: "Gerando resposta" },
+        })
         const handle = streamChat({
           provider: modelInfo.provider,
           model: modelInfo.model,

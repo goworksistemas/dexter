@@ -1,12 +1,21 @@
 import type { User } from "@supabase/supabase-js"
 
-import type { ThemePreference, UserPreferences, UserProfile } from "@/types"
+import type {
+  DexterRole,
+  ThemePreference,
+  UserPreferences,
+  UserProfile,
+} from "@/types"
 import { supabase } from "./client"
 import { userToProfile } from "./auth"
 
 function parsePreferences(raw: unknown): UserPreferences {
   if (!raw || typeof raw !== "object") return {}
-  const obj = raw as { theme?: unknown; sidebarCollapsed?: unknown }
+  const obj = raw as {
+    theme?: unknown
+    sidebarCollapsed?: unknown
+    connectors?: unknown
+  }
   const prefs: UserPreferences = {}
   if (obj.theme === "light" || obj.theme === "dark" || obj.theme === "system") {
     prefs.theme = obj.theme
@@ -14,7 +23,19 @@ function parsePreferences(raw: unknown): UserPreferences {
   if (typeof obj.sidebarCollapsed === "boolean") {
     prefs.sidebarCollapsed = obj.sidebarCollapsed
   }
+  if (obj.connectors && typeof obj.connectors === "object") {
+    const c = obj.connectors as { notion?: unknown; outlook?: unknown }
+    const connectors: NonNullable<UserPreferences["connectors"]> = {}
+    if (typeof c.notion === "boolean") connectors.notion = c.notion
+    if (typeof c.outlook === "boolean") connectors.outlook = c.outlook
+    if (Object.keys(connectors).length > 0) prefs.connectors = connectors
+  }
   return prefs
+}
+
+function parseRole(raw: unknown): DexterRole {
+  if (raw === "admin" || raw === "master" || raw === "user") return raw
+  return "user"
 }
 
 /** Carrega perfil da tabela public.profiles; fallback para user_metadata. */
@@ -24,7 +45,7 @@ export async function fetchUserProfile(user: User): Promise<UserProfile> {
 
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, email, full_name, avatar_url, preferences")
+    .select("id, email, full_name, avatar_url, preferences, role, disabled_at")
     .eq("id", user.id)
     .maybeSingle()
 
@@ -36,6 +57,8 @@ export async function fetchUserProfile(user: User): Promise<UserProfile> {
     name: data.full_name ?? fallback.name,
     avatarUrl: data.avatar_url ?? fallback.avatarUrl,
     preferences: parsePreferences(data.preferences),
+    role: parseRole(data.role),
+    disabledAt: (data.disabled_at as string | null) ?? null,
   }
 }
 
@@ -96,9 +119,14 @@ export async function updateProfilePreferences(
 
   if (readErr) throw new Error(readErr.message)
 
+  const prev = parsePreferences(current?.preferences)
   const next: UserPreferences = {
-    ...parsePreferences(current?.preferences),
+    ...prev,
     ...patch,
+    connectors:
+      patch.connectors || prev.connectors
+        ? { ...prev.connectors, ...patch.connectors }
+        : undefined,
   }
 
   const { error } = await supabase

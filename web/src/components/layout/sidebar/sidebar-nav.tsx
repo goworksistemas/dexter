@@ -3,7 +3,6 @@ import {
   FolderKanban,
   MessagesSquare,
   Plus,
-  Settings,
 } from "lucide-react"
 import { Link } from "react-router-dom"
 
@@ -41,12 +40,6 @@ const NAV_ITEMS: NavItem[] = [
     label: "Artefatos",
     icon: Blocks,
     isActive: (p) => p.startsWith("/artifacts"),
-  },
-  {
-    to: "/settings",
-    label: "Configurações",
-    icon: Settings,
-    isActive: (p) => p.startsWith("/settings"),
   },
 ]
 

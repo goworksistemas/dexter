@@ -38,16 +38,65 @@ export async function fetchChats(signal?: AbortSignal): Promise<ChatSummary[]> {
   return response.json()
 }
 
-/** Histórico de mensagens de uma conversa
- * (`GET /api/chats/:id/messages`). */
+export interface ChatMessagesPage {
+  messages: ChatMessageRecord[]
+  hasMore: boolean
+}
+
+export interface FetchChatMessagesOpts {
+  signal?: AbortSignal
+  /** Default 40 (cap 100 no servidor). */
+  limit?: number
+  /** Id da mensagem mais antiga já carregada — busca só o que veio antes. */
+  before?: string
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/** Retry em boot (web sobe antes do AgentCore) e hiccups de rede. */
+export async function fetchChatMessagesWithRetry(
+  chatId: string,
+  opts: FetchChatMessagesOpts = {},
+  attempts = 6,
+): Promise<ChatMessagesPage> {
+  let lastError: unknown
+  for (let i = 0; i < attempts; i++) {
+    if (opts.signal?.aborted) throw new DOMException("Aborted", "AbortError")
+    try {
+      return await fetchChatMessages(chatId, opts)
+    } catch (err) {
+      lastError = err
+      if (err instanceof DOMException && err.name === "AbortError") throw err
+      if (err instanceof Error && /aborted|AbortError/i.test(err.message)) throw err
+      if (i === attempts - 1) break
+      await sleep(250 * 2 ** i)
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Falha ao carregar mensagens.")
+}
+
+/** Página de mensagens (`GET /api/chats/:id/messages?limit=&before=`). */
 export async function fetchChatMessages(
   chatId: string,
-  signal?: AbortSignal,
-): Promise<ChatMessageRecord[]> {
-  const response = await fetch(`${BASE_URL}/chats/${chatId}/messages`, {
-    headers: await authHeaders(),
-    signal,
-  })
+  opts: FetchChatMessagesOpts | AbortSignal = {},
+): Promise<ChatMessagesPage> {
+  const normalized: FetchChatMessagesOpts =
+    opts instanceof AbortSignal ? { signal: opts } : opts
+  const params = new URLSearchParams()
+  params.set("limit", String(normalized.limit ?? 40))
+  if (normalized.before) params.set("before", normalized.before)
+
+  const response = await fetch(
+    `${BASE_URL}/chats/${chatId}/messages?${params}`,
+    {
+      headers: await authHeaders(),
+      signal: normalized.signal,
+    },
+  )
   if (!response.ok) {
     throw new Error(
       `GET /api/chats/${chatId}/messages respondeu ${response.status} ${response.statusText}`,
@@ -138,12 +187,12 @@ export async function deleteChat(chatId: string): Promise<void> {
 }
 
 /**
- * Mantém as primeiras `keepCount` mensagens da conversa e apaga o restante
- * (`POST /api/chats/:id/truncate`). Usado por editar / tentar novamente.
+ * Apaga a mensagem e tudo depois dela
+ * (`POST /api/chats/:id/truncate` com `deleteFromMessageId`).
  */
-export async function truncateChatMessages(
+export async function truncateChatFromMessage(
   chatId: string,
-  keepCount: number,
+  deleteFromMessageId: string,
 ): Promise<void> {
   const response = await fetch(`${BASE_URL}/chats/${chatId}/truncate`, {
     method: "POST",
@@ -151,10 +200,12 @@ export async function truncateChatMessages(
       "Content-Type": "application/json",
       ...(await authHeaders()),
     },
-    body: JSON.stringify({ keepCount }),
+    body: JSON.stringify({ deleteFromMessageId }),
   })
   if (!response.ok) {
-    if (response.status === 404) throw new Error("Conversa não encontrada.")
+    if (response.status === 404) {
+      throw new Error("Conversa ou mensagem não encontrada.")
+    }
     if (response.status === 403) throw new Error("Sem permissão para esta conversa.")
     throw new Error(
       `POST /api/chats/${chatId}/truncate respondeu ${response.status}`,

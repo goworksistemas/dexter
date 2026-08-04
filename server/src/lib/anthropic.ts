@@ -41,7 +41,7 @@ export interface AnthropicStreamHandle {
 
 /** Inicia o streaming de uma resposta na Anthropic. */
 export function streamChatAnthropic(opts: AnthropicStreamOptions): AnthropicStreamHandle {
-  const model = opts.model ?? config.ANTHROPIC_MODEL
+  const model = opts.model ?? config.ANTHROPIC_MODEL // fallback legado; preferir catálogo admin
   const stream = getClient().messages.stream(
     {
       model,

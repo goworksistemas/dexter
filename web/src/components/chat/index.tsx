@@ -21,7 +21,7 @@ import {
   useIsChatRunning,
 } from "@/lib/chats"
 import { runSnapshotToThreadMessages } from "@/lib/chats/chat-runs-store"
-import { truncateChatMessages } from "@/lib/chats/api"
+import { truncateChatFromMessage } from "@/lib/chats/api"
 import { useModels } from "@/lib/models"
 import { useDexterRuntime } from "@/lib/runtime/use-dexter-runtime"
 import {
@@ -47,6 +47,13 @@ function paraThreadMessageLike(message: ThreadMessage): ThreadMessageLike {
 export function ChatThread() {
   const {
     activeChatId,
+    isLoadingHistory,
+    expectsThread,
+    historyError,
+    reloadHistory,
+    hasMoreHistory,
+    isLoadingOlderHistory,
+    loadOlderHistory,
     registerRuntime,
     refreshChats,
     consumePendingFirstMessage,
@@ -94,16 +101,21 @@ export function ChatThread() {
     return () => registerRuntime(null)
   }, [runtime, registerRuntime])
 
-  // Espelha o store → thread. O early-return em `thread.isRunning` quebrava
-  // edit/retry e retorno a chat em background: o assistant-ui deriva
-  // isRunning do `status: "running"` da última mensagem, então um reset com
-  // esse status bloqueava todos os updates seguintes (UI eternamente
-  // "Processando…") mesmo depois do store completar.
+  // Espelha o store → thread enquanto roda. Ao cancelar/erro/complete, aplica
+  // UMA vez se a thread ainda acha que está running (senão o Parar “não faz nada”).
+  // Depois disso o loadHistory/API manda no histórico — não ficar reaplicando
+  // snapshot settled por cima.
   useEffect(() => {
     const sync = () => {
       const snap = getRun(activeChatId)
       if (!snap) return
-      runtime.thread.reset(runSnapshotToThreadMessages(snap))
+      if (snap.status === "running") {
+        runtime.thread.reset(runSnapshotToThreadMessages(snap))
+        return
+      }
+      if (runtime.thread.getState().isRunning) {
+        runtime.thread.reset(runSnapshotToThreadMessages(snap))
+      }
     }
     sync()
     return subscribe(sync)
@@ -155,7 +167,11 @@ export function ChatThread() {
 
   const stopGeneration = useCallback(() => {
     cancelRun(activeChatId)
-    runtime.thread.composer.cancel()
+    try {
+      runtime.thread.composer.cancel()
+    } catch {
+      // composer.cancel é best-effort (runtime local); o store manda.
+    }
   }, [cancelRun, activeChatId, runtime])
 
   const iniciarRegeneracao = useCallback(
@@ -225,7 +241,7 @@ export function ChatThread() {
       }
 
       try {
-        await truncateChatMessages(activeChatId, index)
+        await truncateChatFromMessage(activeChatId, messageId)
         const kept = current.slice(0, index).map(paraThreadMessageLike)
         const userMessage: ThreadMessageLike = {
           id: crypto.randomUUID(),
@@ -264,8 +280,11 @@ export function ChatThread() {
 
     // Mantém até a última msg do usuário (inclusive); apaga respostas depois.
     const keepCount = lastUserIndex + 1
+    const deleteFrom = current[lastUserIndex + 1]
     try {
-      await truncateChatMessages(activeChatId, keepCount)
+      if (deleteFrom?.id) {
+        await truncateChatFromMessage(activeChatId, deleteFrom.id)
+      }
       iniciarRegeneracao(current.slice(0, keepCount).map(paraThreadMessageLike))
     } catch (err) {
       toast.error(
@@ -281,6 +300,14 @@ export function ChatThread() {
         pendingAttachments={pendingAttachments}
         attachmentsByMessageId={sentAttachments.porMensagem}
         storeRunning={storeRunning}
+        isLoadingHistory={isLoadingHistory}
+        expectsThread={expectsThread}
+        historyError={historyError}
+        onRetryHistory={reloadHistory}
+        hasMoreHistory={hasMoreHistory}
+        isLoadingOlderHistory={isLoadingOlderHistory}
+        onLoadOlderHistory={() => void loadOlderHistory()}
+        chatId={activeChatId}
         runProgress={runProgress}
         stepsByMessageId={stepsByMessageId}
         onStop={stopGeneration}

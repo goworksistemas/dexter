@@ -141,10 +141,10 @@ export function AgentActivity({
           ) : (
             steps.map((step) => <PassoItem key={step.id} step={step} />)
           )}
-          {running && steps.length > 0 && statusText && (
+          {running && steps.length > 0 && (
             <li className="flex items-center gap-2 px-1.5 py-1 text-[11px] text-muted-foreground sm:text-xs">
               <CircleDashed className="size-3.5 shrink-0 animate-spin text-primary/60" />
-              {statusText}…
+              Em andamento…
             </li>
           )}
         </ol>

@@ -14,18 +14,31 @@ export function SidebarHeader({
   onCollapse,
   onToggleSearch,
   onCloseMobile,
+  onGoHome,
 }: {
   searchOpen: boolean
   onCollapse: () => void
   onToggleSearch: () => void
   onCloseMobile: () => void
+  /** Marca/nome → conversa nova (home), não só navegar pra `/`. */
+  onGoHome: () => void
 }) {
   return (
     <div className="flex h-14 shrink-0 items-center gap-2 px-3">
-      <DexterMark className="size-7 rounded-lg" />
-      <span className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-sidebar-foreground">
-        Dexter
-      </span>
+      <button
+        type="button"
+        onClick={() => {
+          onGoHome()
+          onCloseMobile()
+        }}
+        className="flex min-w-0 flex-1 items-center gap-2 rounded-lg text-left outline-none ring-sidebar-ring focus-visible:ring-2"
+        aria-label="Ir para o início"
+      >
+        <DexterMark className="size-7 rounded-lg" />
+        <span className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-sidebar-foreground">
+          Dexter
+        </span>
+      </button>
 
       <SidebarTip label="Recolher menu" side="bottom">
         <Button

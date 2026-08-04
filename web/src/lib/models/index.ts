@@ -3,4 +3,10 @@
 // chat (`useDexterRuntime`).
 export { ModelsProvider, useModels } from "./models-context"
 export { fetchModels } from "./api"
-export type { ModelInfo, ModelProvider, ModelsResponse } from "./types"
+export type {
+  ModelCapabilities,
+  ModelInfo,
+  ModelProvider,
+  ModelsResponse,
+} from "./types"
+export { modelCaps } from "./types"

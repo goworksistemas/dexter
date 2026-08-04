@@ -1,8 +1,7 @@
 import { Menu, Monitor, Moon, Sun } from "lucide-react"
 import { Link, useLocation } from "react-router-dom"
 
-import { ConnectionsDialog } from "@/components/chat/connections-dialog"
-import { ModelSelector } from "@/components/chat/model-selector"
+import { ChatHeaderTitle, ChatActionsOverlays } from "@/components/chat/chat-actions"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -11,7 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useSidebar } from "@/hooks/use-sidebar"
-import { useChats } from "@/lib/chats"
+import { useChatActions, useChats } from "@/lib/chats"
 import { useProjects } from "@/lib/projects"
 import { updateProfileTheme } from "@/lib/supabase"
 import { useAuth } from "@/providers/auth-provider"
@@ -33,6 +32,7 @@ export function Header() {
   const { theme, setTheme } = useTheme()
   const { toggle } = useSidebar()
   const { activeChat } = useChats()
+  const chatActions = useChatActions()
   const { projects, activeProject } = useProjects()
   const { refreshProfile } = useAuth()
   const { pathname } = useLocation()
@@ -42,7 +42,6 @@ export function Header() {
     ? projects.find((p) => p.id === projectDetailId)
     : undefined
   const pageTitle = PAGE_TITLES[pathname]
-  const isChatRoute = !pageTitle && !projectDetailId
 
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor
 
@@ -55,8 +54,18 @@ export function Header() {
       })
   }
 
+  const chatTitle = activeChat?.title ?? "Nova conversa"
+  const chatMenuActions = chatActions.chatMenu
+    ? chatActions.actionsForChat(
+        chatActions.chatMenu.chatId,
+        chatActions.chatMenu.title,
+        chatActions.chatMenu.projectId,
+      )
+    : null
+
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-border/50 px-3 sm:px-4">
+    <>
+    <header className="flex h-14 shrink-0 items-center justify-between gap-2 px-3 sm:px-4">
       <div className="flex min-w-0 items-center gap-1.5">
         <Button
           variant="ghost"
@@ -90,10 +99,26 @@ export function Header() {
           <h1 className="truncate text-sm font-medium text-foreground/90">
             {pageTitle}
           </h1>
+        ) : activeChat ? (
+          <ChatHeaderTitle
+            title={chatTitle}
+            subtitle={activeProject?.name}
+            isRenaming={chatActions.renamingId === activeChat.id}
+            renameValue={chatActions.renameValue}
+            renameInputRef={chatActions.renameInputRef}
+            onRenameChange={chatActions.setRenameValue}
+            onRenameCommit={() => void chatActions.commitRename(activeChat.id)}
+            onRenameCancel={chatActions.cancelRename}
+            actions={chatActions.actionsForChat(
+              activeChat.id,
+              chatTitle,
+              activeChat.project_id,
+            )}
+          />
         ) : (
           <div className="min-w-0 leading-tight">
             <h1 className="truncate text-sm font-medium text-foreground/90">
-              {activeChat?.title ?? "Nova conversa"}
+              {chatTitle}
             </h1>
             {activeProject ? (
               <p className="truncate text-[11px] text-muted-foreground">
@@ -105,13 +130,6 @@ export function Header() {
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
-        {isChatRoute ? (
-          <>
-            <ConnectionsDialog />
-            <ModelSelector />
-          </>
-        ) : null}
-
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon-sm" aria-label="Alternar tema">
@@ -135,5 +153,16 @@ export function Header() {
         </DropdownMenu>
       </div>
     </header>
+
+    <ChatActionsOverlays
+      chatMenu={chatActions.chatMenu}
+      onCloseChatMenu={chatActions.closeChatMenu}
+      actionsForMenu={chatMenuActions}
+      moveDialog={chatActions.moveDialog}
+      onMoveDialogOpenChange={(open) =>
+        chatActions.setMoveDialog((prev) => ({ ...prev, open }))
+      }
+    />
+    </>
   )
 }

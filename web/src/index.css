@@ -401,3 +401,43 @@
     font-weight: 600;
   }
 }
+
+
+/* Geração de imagem — quadro com brilho / shimmer */
+.image-gen-frame {
+  background:
+    radial-gradient(120% 90% at 20% 15%, color-mix(in srgb, var(--primary) 22%, transparent), transparent 55%),
+    radial-gradient(100% 80% at 85% 80%, color-mix(in srgb, var(--secondary) 18%, transparent), transparent 50%),
+    color-mix(in srgb, var(--muted) 70%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--secondary) 12%, transparent) inset,
+    0 12px 40px color-mix(in srgb, var(--primary) 14%, transparent);
+}
+.image-gen-shimmer {
+  background: linear-gradient(
+    110deg,
+    transparent 25%,
+    color-mix(in srgb, white 28%, transparent) 45%,
+    color-mix(in srgb, var(--secondary) 22%, transparent) 55%,
+    transparent 75%
+  );
+  background-size: 220% 100%;
+  animation: image-gen-shimmer 2.2s ease-in-out infinite;
+}
+.image-gen-glow {
+  background:
+    radial-gradient(circle at 30% 30%, color-mix(in srgb, var(--primary) 35%, transparent), transparent 42%),
+    radial-gradient(circle at 70% 65%, color-mix(in srgb, var(--secondary) 30%, transparent), transparent 45%);
+  animation: image-gen-glow 2.8s ease-in-out infinite alternate;
+  mix-blend-mode: soft-light;
+}
+@keyframes image-gen-shimmer {
+  0% { background-position: 120% 0; opacity: 0.55; }
+  50% { opacity: 0.95; }
+  100% { background-position: -120% 0; opacity: 0.55; }
+}
+@keyframes image-gen-glow {
+  0% { opacity: 0.45; transform: scale(1); }
+  100% { opacity: 0.9; transform: scale(1.04); }
+}

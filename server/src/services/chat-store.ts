@@ -4,6 +4,10 @@
  * Toda leitura/escrita por chat exige ownership (user_id) — service_role
  * bypassa RLS, então a checagem é obrigatória no código.
  */
+import {
+  contentHasDataImage,
+  migrateMessageDataImages,
+} from "../lib/chat-images.js"
 import { supabase } from "../lib/supabase.js"
 import { ForbiddenError } from "./auth.js"
 import { assertProjectOwnedOrThrow } from "./project-store.js"
@@ -180,12 +184,12 @@ export async function getChatToolCalls(
   chatId: string,
   userId: string,
 ): Promise<StoredToolCall[]> {
-  const ownership = await assertChatOwnedOrNew(chatId, userId)
-  if (ownership === "new") return []
-
+  // user_id na própria tabela — sem assert extra (troca de chat mais leve).
   const { data, error } = await supabase
     .from("agent_tool_calls")
-    .select("id, message_id, tool_name, input, output, status, duration_ms, created_at")
+    .select(
+      "id, message_id, tool_name, input, output, status, duration_ms, created_at",
+    )
     .eq("chat_id", chatId)
     .eq("user_id", userId)
     .order("created_at", { ascending: true })
@@ -219,19 +223,114 @@ export async function getMessages(
   chatId: string,
   userId: string,
 ): Promise<StoredMessage[]> {
-  const ownership = await assertChatOwnedOrNew(chatId, userId)
-  if (ownership === "new") return []
-
+  // 1 round-trip: ownership + mensagens (evita assert + select separados).
   const { data, error } = await supabase
     .from("agent_messages")
-    .select("id, role, content, created_at")
+    .select("id, role, content, created_at, chat:agent_chats!inner(user_id)")
     .eq("chat_id", chatId)
+    .eq("chat.user_id", userId)
     .order("created_at", { ascending: true })
 
   if (error) {
     throw new Error(`getMessages falhou: ${error.message}`)
   }
-  return (data ?? []) as StoredMessage[]
+
+  if (!data || data.length === 0) {
+    const ownership = await assertChatOwnedOrNew(chatId, userId)
+    if (ownership === "new") return []
+    return []
+  }
+
+  const rows: StoredMessage[] = data.map((row) => ({
+    id: row.id as string,
+    role: row.role as ChatRole,
+    content: row.content as string,
+    created_at: row.created_at as string,
+  }))
+
+  for (const row of rows) {
+    if (!contentHasDataImage(row.content)) continue
+    row.content = await migrateMessageDataImages({
+      userId,
+      chatId,
+      messageId: row.id,
+      content: row.content,
+    })
+  }
+  return rows
+}
+
+
+export interface MessagesPage {
+  messages: StoredMessage[]
+  hasMore: boolean
+}
+
+/**
+ * Página de mensagens para a UI (mais recentes / mais antigas que `before`).
+ * Ordem cronológica no array. `before` = id da mensagem mais antiga já carregada.
+ */
+export async function getMessagesPage(
+  chatId: string,
+  userId: string,
+  opts: { limit?: number; before?: string } = {},
+): Promise<MessagesPage> {
+  const limit = Math.min(Math.max(opts.limit ?? 40, 1), 100)
+
+  let query = supabase
+    .from("agent_messages")
+    .select("id, role, content, created_at, chat:agent_chats!inner(user_id)")
+    .eq("chat_id", chatId)
+    .eq("chat.user_id", userId)
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(limit + 1)
+
+  if (opts.before) {
+    const { data: cursor, error: cursorError } = await supabase
+      .from("agent_messages")
+      .select("id, created_at")
+      .eq("chat_id", chatId)
+      .eq("id", opts.before)
+      .maybeSingle()
+    if (cursorError) {
+      throw new Error(`getMessagesPage (cursor) falhou: ${cursorError.message}`)
+    }
+    if (!cursor) {
+      return { messages: [], hasMore: false }
+    }
+    query = query.lt("created_at", cursor.created_at as string)
+  }
+
+  const { data, error } = await query
+  if (error) {
+    throw new Error(`getMessagesPage falhou: ${error.message}`)
+  }
+
+  if (!data || data.length === 0) {
+    await assertChatOwnedOrNew(chatId, userId)
+    return { messages: [], hasMore: false }
+  }
+
+  const hasMore = data.length > limit
+  const page = data.slice(0, limit).reverse()
+  const rows: StoredMessage[] = page.map((row) => ({
+    id: row.id as string,
+    role: row.role as ChatRole,
+    content: row.content as string,
+    created_at: row.created_at as string,
+  }))
+
+  for (const row of rows) {
+    if (!contentHasDataImage(row.content)) continue
+    row.content = await migrateMessageDataImages({
+      userId,
+      chatId,
+      messageId: row.id,
+      content: row.content,
+    })
+  }
+  return { messages: rows, hasMore }
 }
 
 /** Renomeia um chat do próprio usuário. Chat inexistente → null. */
@@ -356,6 +455,63 @@ export async function truncateMessages(
 
   if (touchError) {
     throw new Error(`truncateMessages (touch) falhou: ${touchError.message}`)
+  }
+
+  return true
+}
+
+/**
+ * Apaga a mensagem `fromMessageId` e todas as posteriores (ordem cronológica).
+ * Usado por editar / retry quando a UI só tem uma janela do histórico.
+ */
+export async function truncateFromMessageId(
+  chatId: string,
+  userId: string,
+  fromMessageId: string,
+): Promise<boolean> {
+  const ownership = await assertChatOwnedOrNew(chatId, userId)
+  if (ownership === "new") return true
+
+  const { data, error } = await supabase
+    .from("agent_messages")
+    .select("id, created_at")
+    .eq("chat_id", chatId)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true })
+
+  if (error) {
+    throw new Error(`truncateFromMessageId falhou: ${error.message}`)
+  }
+
+  const rows = data ?? []
+  const idx = rows.findIndex((m) => m.id === fromMessageId)
+  if (idx < 0) {
+    return false
+  }
+
+  const idsToDelete = rows.slice(idx).map((m) => m.id as string)
+  if (idsToDelete.length === 0) return true
+
+  const { error: delError } = await supabase
+    .from("agent_messages")
+    .delete()
+    .eq("chat_id", chatId)
+    .in("id", idsToDelete)
+
+  if (delError) {
+    throw new Error(`truncateFromMessageId (delete) falhou: ${delError.message}`)
+  }
+
+  const { error: touchError } = await supabase
+    .from("agent_chats")
+    .update({ updated_at: new Date().toISOString() })
+    .eq("id", chatId)
+    .eq("user_id", userId)
+
+  if (touchError) {
+    throw new Error(
+      `truncateFromMessageId (touch) falhou: ${touchError.message}`,
+    )
   }
 
   return true

@@ -16,12 +16,22 @@ import { stripArtifactAppendix } from "@/lib/artifacts/context-inject"
 import {
   deleteChat as deleteChatApi,
   fetchChatMessages,
+  fetchChatMessagesWithRetry,
   fetchChats,
   moveChatToProject as moveChatToProjectApi,
   renameChat as renameChatApi,
 } from "./api"
 import { chatRunsStore, runSnapshotToThreadMessages } from "./chat-runs-store"
+import {
+  clearCachedHistory,
+  getCachedHistory,
+  mergeHistoryPage,
+  setCachedHistory,
+} from "./history-cache"
 import type { ChatMessageRecord, ChatSummary } from "./types"
+
+/** Janela inicial ao abrir conversa — o resto sobe sob demanda. */
+const HISTORY_PAGE_SIZE = 40
 
 interface ChatsContextValue {
   chats: ChatSummary[]
@@ -30,6 +40,17 @@ interface ChatsContextValue {
   activeChatId: string
   activeChat: ChatSummary | undefined
   isLoadingHistory: boolean
+  /** URL /c/:id ou conversa conhecida — nunca mostrar empty-state de "nova". */
+  expectsThread: boolean
+  /** Falha ao carregar histórico (após retries). */
+  historyError: string | null
+  /** Recarrega o histórico da conversa ativa. */
+  reloadHistory: () => void
+  /** Ainda há mensagens mais antigas no servidor. */
+  hasMoreHistory: boolean
+  isLoadingOlderHistory: boolean
+  /** Carrega página anterior (rolar pra cima). */
+  loadOlderHistory: () => Promise<void>
   /** Cria conversa nova; opcionalmente já associada a um projeto. */
   newChat: (projectId?: string | null) => void
   /**
@@ -120,6 +141,10 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
     return fromUrl ?? crypto.randomUUID()
   })
   const [isLoadingHistory, setIsLoadingHistory] = React.useState(false)
+  const [historyError, setHistoryError] = React.useState<string | null>(null)
+  const [hasMoreHistory, setHasMoreHistory] = React.useState(false)
+  const [isLoadingOlderHistory, setIsLoadingOlderHistory] =
+    React.useState(false)
 
   const runtimeRef = React.useRef<AssistantRuntime | null>(null)
   const pendingHistoryRef = React.useRef<readonly ThreadMessageLike[] | null>(
@@ -130,6 +155,16 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
   const pendingProjectIdRef = React.useRef<string | null>(null)
   /** Evita aplicar histórico atrasado de um chat que já não é o ativo. */
   const historyRequestRef = React.useRef(0)
+  const historyAbortRef = React.useRef<AbortController | null>(null)
+  const olderAbortRef = React.useRef<AbortController | null>(null)
+  const hasMoreHistoryRef = React.useRef(false)
+  const loadingOlderRef = React.useRef(false)
+  /** chatIds cujo GET messages já concluiu com sucesso nesta sessão. */
+  const historyReadyRef = React.useRef(new Set<string>())
+  /** Evita loop de auto-retry quando o backend continua fora. */
+  const historyAutoRetryRef = React.useRef<string | null>(null)
+  /** Garante load no mount quando a URL já traz /c/:id (refresh/deep-link). */
+  const mountHistoryLoadedRef = React.useRef(false)
   /** Primeira mensagem digitada fora do chat, aguardando o ChatThread montar. */
   const pendingFirstMessageRef = React.useRef<{
     chatId: string
@@ -172,11 +207,20 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
   }, [isAuthLoading, refreshChats])
 
   const loadHistory = React.useCallback((id: string) => {
+    historyAbortRef.current?.abort()
+    olderAbortRef.current?.abort()
+    const abort = new AbortController()
+    historyAbortRef.current = abort
+
     const requestId = ++historyRequestRef.current
     setIsLoadingHistory(true)
+    setHistoryError(null)
+    setIsLoadingOlderHistory(false)
+    loadingOlderRef.current = false
     pendingHistoryRef.current = null
 
     // Desanexa o run local da conversa anterior — NÃO cancela o store.
+    // Mantém as bolhas atuais até o histórico novo chegar (troca atômica).
     runtimeRef.current?.thread.cancelRun()
 
     const live = chatRunsStore.getRun(id)
@@ -186,16 +230,32 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
         pendingHistoryRef,
         runSnapshotToThreadMessages(live),
       )
+      hasMoreHistoryRef.current = false
+      setHasMoreHistory(false)
+      historyReadyRef.current.add(id)
       setIsLoadingHistory(false)
       return
     }
 
-    fetchChatMessages(id)
-      .then((mensagens) => {
+    // Paint imediato se já abrimos este chat nesta sessão.
+    const cached = getCachedHistory(id)
+    if (cached) {
+      applyHistory(runtimeRef.current, pendingHistoryRef, cached.messages)
+      hasMoreHistoryRef.current = cached.hasMore
+      setHasMoreHistory(cached.hasMore)
+      // Continua revalidando em background — não liberar "home" cedo demais.
+    } else {
+      hasMoreHistoryRef.current = false
+      setHasMoreHistory(false)
+    }
+
+    void fetchChatMessagesWithRetry(id, {
+      signal: abort.signal,
+      limit: HISTORY_PAGE_SIZE,
+    })
+      .then((page) => {
         if (requestId !== historyRequestRef.current) return
 
-        // Se uma geração começou/terminou enquanto o fetch rodava, prioriza
-        // o snapshot live (evita perder resposta ainda não commitada na API).
         const liveNow = chatRunsStore.getRun(id)
         if (liveNow?.status === "running") {
           applyHistory(
@@ -203,23 +263,43 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
             pendingHistoryRef,
             runSnapshotToThreadMessages(liveNow),
           )
+          hasMoreHistoryRef.current = false
+          setHasMoreHistory(false)
+          historyReadyRef.current.add(id)
+          setHistoryError(null)
           return
         }
-        if (liveNow && liveNow.messages.length > mensagens.length) {
-          applyHistory(
-            runtimeRef.current,
-            pendingHistoryRef,
-            runSnapshotToThreadMessages(liveNow),
-          )
+        if (liveNow && liveNow.messages.length > page.messages.length) {
+          const snap = runSnapshotToThreadMessages(liveNow)
+          applyHistory(runtimeRef.current, pendingHistoryRef, snap)
+          setCachedHistory(id, snap, false)
+          hasMoreHistoryRef.current = false
+          setHasMoreHistory(false)
+          historyReadyRef.current.add(id)
+          setHistoryError(null)
           return
         }
 
-        const historico = mensagens.map(paraThreadMessageLike)
-        applyHistory(runtimeRef.current, pendingHistoryRef, historico)
-        chatRunsStore.discardRun(id)
+        const historico = page.messages.map(paraThreadMessageLike)
+        const merged = mergeHistoryPage(
+          getCachedHistory(id),
+          historico,
+          page.hasMore,
+        )
+        setCachedHistory(id, merged.messages, merged.hasMore)
+        applyHistory(runtimeRef.current, pendingHistoryRef, merged.messages)
+        hasMoreHistoryRef.current = merged.hasMore
+        setHasMoreHistory(merged.hasMore)
+        historyReadyRef.current.add(id)
+        setHistoryError(null)
+        if (liveNow) {
+          chatRunsStore.discardRun(id)
+        }
       })
       .catch((err) => {
         if (requestId !== historyRequestRef.current) return
+        if (err instanceof DOMException && err.name === "AbortError") return
+        if (err instanceof Error && /aborted|AbortError/i.test(err.message)) return
         console.error(`Falha ao carregar histórico da conversa ${id}:`, err)
         const liveNow = chatRunsStore.getRun(id)
         if (liveNow) {
@@ -228,7 +308,20 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
             pendingHistoryRef,
             runSnapshotToThreadMessages(liveNow),
           )
+          historyReadyRef.current.add(id)
+          setHistoryError(null)
+          return
         }
+        if (getCachedHistory(id)) {
+          // Cache já na tela — avisa sem cair em "nova conversa".
+          setHistoryError(null)
+          return
+        }
+        setHistoryError(
+          err instanceof Error
+            ? err.message
+            : "Não foi possível carregar esta conversa.",
+        )
       })
       .finally(() => {
         if (requestId === historyRequestRef.current) {
@@ -236,6 +329,62 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
         }
       })
   }, [])
+
+  const loadOlderHistory = React.useCallback(async () => {
+    const id = activeChatId
+    if (!id || !hasMoreHistoryRef.current || loadingOlderRef.current) return
+
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    const current = runtime.thread.getState().messages
+    const oldest = current[0]
+    if (!oldest?.id) return
+
+    olderAbortRef.current?.abort()
+    const abort = new AbortController()
+    olderAbortRef.current = abort
+    loadingOlderRef.current = true
+    setIsLoadingOlderHistory(true)
+
+    try {
+      const page = await fetchChatMessages(id, {
+        signal: abort.signal,
+        limit: HISTORY_PAGE_SIZE,
+        before: oldest.id,
+      })
+      if (abort.signal.aborted) return
+      if (historyAbortRef.current?.signal.aborted) return
+
+      const older = page.messages.map(paraThreadMessageLike)
+      const existing = new Set(current.map((m) => m.id))
+      const unique = older.filter((m) => m.id && !existing.has(m.id))
+      const kept: ThreadMessageLike[] = current.map((m) => ({
+        id: m.id,
+        role: m.role,
+        content:
+          typeof m.content === "string"
+            ? m.content
+            : m.content
+                .map((p) => (p.type === "text" ? p.text : ""))
+                .join(""),
+        createdAt: m.createdAt,
+      }))
+      const merged = [...unique, ...kept]
+      applyHistory(runtime, pendingHistoryRef, merged)
+      hasMoreHistoryRef.current = page.hasMore
+      setHasMoreHistory(page.hasMore)
+      setCachedHistory(id, merged, page.hasMore)
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return
+      if (err instanceof Error && /aborted|AbortError/i.test(err.message)) return
+      console.error(`Falha ao carregar mensagens antigas de ${id}:`, err)
+    } finally {
+      if (olderAbortRef.current === abort) {
+        loadingOlderRef.current = false
+        setIsLoadingOlderHistory(false)
+      }
+    }
+  }, [activeChatId])
 
   /** Abre uma conversa nova e devolve o id/projeto resolvidos. */
   const abrirConversaNova = React.useCallback(
@@ -245,6 +394,9 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
       pendingProjectIdRef.current = pid
       pendingHistoryRef.current = null
       setActiveChatId(id)
+      hasMoreHistoryRef.current = false
+      setHasMoreHistory(false)
+      setIsLoadingOlderHistory(false)
       // Só desanexa a UI; gerações de outros chats seguem em background.
       runtimeRef.current?.thread.cancelRun()
       runtimeRef.current?.thread.reset([])
@@ -306,6 +458,18 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
     [chats, loadHistory, navigate, location.pathname],
   )
 
+  // Refresh/deep-link: URL já tem chatId no 1º paint — precisa carregar 1x.
+  React.useEffect(() => {
+    if (mountHistoryLoadedRef.current) return
+    const { chatId: fromUrl } = parseChatRoute(location.pathname)
+    if (!fromUrl) {
+      mountHistoryLoadedRef.current = true
+      return
+    }
+    mountHistoryLoadedRef.current = true
+    loadHistory(fromUrl)
+  }, [location.pathname, loadHistory])
+
   // Deep-link: URL → estado
   React.useEffect(() => {
     if (skipUrlSyncRef.current) {
@@ -329,6 +493,28 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
       }
     }
   }, [location.pathname, activeChatId, loadHistory])
+
+  // Boot race: lista de chats chegou e o 1º GET messages falhou (server ainda
+  // subindo) → tenta de novo uma vez sem o usuário precisar clicar.
+  React.useEffect(() => {
+    if (!chats.some((c) => c.id === activeChatId)) return
+    if (historyReadyRef.current.has(activeChatId)) return
+    if (isLoadingHistory) return
+    if (historyAutoRetryRef.current === activeChatId) return
+    historyAutoRetryRef.current = activeChatId
+    loadHistory(activeChatId)
+  }, [chats, activeChatId, isLoadingHistory, loadHistory])
+
+  const reloadHistory = React.useCallback(() => {
+    historyAutoRetryRef.current = null
+    historyReadyRef.current.delete(activeChatId)
+    loadHistory(activeChatId)
+  }, [activeChatId, loadHistory])
+
+  const routeChatId = parseChatRoute(location.pathname).chatId
+  const expectsThread = Boolean(
+    routeChatId || chats.some((c) => c.id === activeChatId),
+  )
 
   // Sync inverso: conversa conhecida em / ou /p/:id → sobe path com /c/:id
   React.useEffect(() => {
@@ -365,6 +551,7 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
     async (id: string) => {
       chatRunsStore.cancelRun(id)
       chatRunsStore.discardRun(id)
+      clearCachedHistory(id)
       await deleteChatApi(id)
       setChats((prev) => prev.filter((c) => c.id !== id))
       if (activeChatId === id) {
@@ -401,6 +588,12 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
       activeChatId,
       activeChat,
       isLoadingHistory,
+      expectsThread,
+      historyError,
+      reloadHistory,
+      hasMoreHistory,
+      isLoadingOlderHistory,
+      loadOlderHistory,
       newChat,
       newChatWithMessage,
       consumePendingFirstMessage,
@@ -418,6 +611,12 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
       activeChatId,
       activeChat,
       isLoadingHistory,
+      expectsThread,
+      historyError,
+      reloadHistory,
+      hasMoreHistory,
+      isLoadingOlderHistory,
+      loadOlderHistory,
       newChat,
       newChatWithMessage,
       consumePendingFirstMessage,
