@@ -3,6 +3,7 @@ import {
   FolderKanban,
   MessagesSquare,
   Plus,
+  Workflow,
 } from "lucide-react"
 import { Link } from "react-router-dom"
 
@@ -36,6 +37,12 @@ const NAV_ITEMS: NavItem[] = [
     isActive: (p) => p.startsWith("/projects"),
   },
   {
+    to: "/workflows",
+    label: "Workflows",
+    icon: Workflow,
+    isActive: (p) => p.startsWith("/workflows"),
+  },
+  {
     to: "/artifacts",
     label: "Artefatos",
     icon: Blocks,
@@ -65,7 +72,7 @@ export function SidebarNav({
           strokeWidth={2.4}
         />
         Novo
-        <kbd className="ml-auto rounded border border-sidebar-border/80 px-1.5 py-0.5 font-sans text-[10px] font-normal text-sidebar-foreground/45">
+        <kbd className="ml-auto rounded border border-sidebar-border/80 px-1.5 py-0.5 font-sans text-[10px] font-normal text-sidebar-foreground/65">
           {newChatShortcut}
         </kbd>
       </button>

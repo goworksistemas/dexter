@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto"
 import cors from "@fastify/cors"
 import rateLimit from "@fastify/rate-limit"
 import Fastify from "fastify"
+import { ZodError } from "zod"
 
 import { config, corsOrigins } from "./config.js"
 import { connectorsBootSummary } from "./connectors/registry.js"
@@ -17,7 +18,12 @@ import connectorsRoutes from "./routes/connectors.js"
 import modelsRoutes from "./routes/models.js"
 import projectsRoutes from "./routes/projects.js"
 import transcribeRoutes from "./routes/transcribe.js"
+import workflowsRoutes from "./routes/workflows.js"
 import { AuthError, ForbiddenError, NotFoundError } from "./services/auth.js"
+import {
+  startWorkflowRunner,
+  stopWorkflowRunner,
+} from "./services/workflow-runner.js"
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -50,6 +56,15 @@ app.setErrorHandler((error, request, reply) => {
     reply.code(error.statusCode).send({ error: "not_found", message: error.message })
     return
   }
+  // Body/query fora do schema (rotas que usam .parse) → 400, mesmo formato de
+  // /api/chat, em vez de 500 com o JSON de issues do Zod.
+  if (error instanceof ZodError) {
+    request.log.warn({ err: error }, "requisição inválida")
+    reply
+      .code(400)
+      .send({ error: "invalid_request", details: error.flatten() })
+    return
+  }
   request.log.error(error)
   const statusCode =
     typeof error === "object" &&
@@ -58,8 +73,18 @@ app.setErrorHandler((error, request, reply) => {
     typeof (error as { statusCode?: unknown }).statusCode === "number"
       ? (error as { statusCode: number }).statusCode
       : 500
+  // 5xx: mensagem interna (SQL/PostgREST/Supabase) NÃO vaza para o cliente —
+  // fica só no log, com o traceId para correlacionar.
+  if (statusCode >= 500) {
+    reply.code(statusCode).send({
+      error: "internal_error",
+      message: "Erro interno. Tente novamente.",
+      traceId: request.traceId,
+    })
+    return
+  }
   reply.code(statusCode).send({
-    error: statusCode >= 500 ? "internal_error" : "request_error",
+    error: "request_error",
     message: error instanceof Error ? error.message : "Erro inesperado",
   })
 })
@@ -79,13 +104,25 @@ await app.register(connectionsRoutes)
 await app.register(connectorsRoutes)
 await app.register(modelsRoutes)
 await app.register(transcribeRoutes)
+await app.register(workflowsRoutes)
 await app.register(adminRoutes)
+
+// Agendador dos workflows: para o timer junto com o servidor (SIGINT/SIGTERM).
+app.addHook("onClose", async () => {
+  stopWorkflowRunner()
+})
 
 async function start(): Promise<void> {
   try {
     await app.listen({ port: config.PORT, host: config.HOST })
     for (const line of connectorsBootSummary()) {
       app.log.info(`[connectors] ${line}`)
+    }
+    // Sem service role não há como executar workflow (escrita bypassa RLS).
+    if (config.SUPABASE_SERVICE_ROLE_KEY) {
+      startWorkflowRunner()
+    } else {
+      app.log.warn("[workflows] agendador desligado — sem SUPABASE_SERVICE_ROLE_KEY")
     }
   } catch (err) {
     app.log.error(err)
