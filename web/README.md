@@ -17,7 +17,7 @@ monorepo pnpm na raiz — lockfile único em `../pnpm-lock.yaml`.
 | Auth | Supabase Auth (`@supabase/supabase-js`) |
 | Roteamento | React Router 7 |
 
-Versão atual do pacote: **1.4.0** (ver `package.json`).
+Versão atual do pacote: **2.0.0** (ver `package.json`).
 
 ## Estrutura de `src/`
 

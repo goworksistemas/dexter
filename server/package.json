@@ -1,6 +1,6 @@
 {
   "name": "agentcore-server",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "description": "AgentCore — backend (Fastify) do Dexter, assistente de IA interno da GoWork.",

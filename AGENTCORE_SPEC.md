@@ -3,7 +3,7 @@
 > Backend estruturado para o super agente de IA da GoWork (**Dexter**).
 > Runtime de alta frequência para chat síncrono, tirando o hot path do n8n.
 
-- **Status:** 🟢 Em produção (v1.4.0)
+- **Status:** 🟢 Em produção (v2.0.0)
 - **Owner:** Luis Cuba (Sistemas)
 - **Tarefa Notion:** [IA | AgentCore](https://app.notion.com/p/3b1c3598383a8160b440ffb52afe557d)
 - **Última atualização:** 2026-08-05
