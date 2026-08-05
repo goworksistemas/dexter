@@ -11,6 +11,7 @@ import {
 import { supabase } from "../lib/supabase.js"
 import { stripArtifactAppendix } from "../systems/artifacts-context.js"
 import { ForbiddenError } from "./auth.js"
+import type { BulkChatsRequest } from "./chat-bulk.js"
 import { assertProjectOwnedOrThrow } from "./project-store.js"
 
 export type ChatRole = "user" | "assistant" | "system"
@@ -53,6 +54,8 @@ export interface ChatSummary {
   project_id: string | null
   updated_at: string
   model: string | null
+  /** Conversa arquivada pelo usuário (null = ativa). */
+  archived_at: string | null
   /** Soma de cost_usd das mensagens do chat (USD). Presente em listChats. */
   cost_usd?: number
 }
@@ -245,12 +248,15 @@ async function attachChatCosts(
   }))
 }
 
-/** Chats do usuário, mais recentes primeiro — para a sidebar. */
+/** Chats do usuário, mais recentes primeiro — para a sidebar.
+ * Soft-deletados ficam fora; arquivados vêm com `archived_at` preenchido e o
+ * front decide onde exibi-los (seção "Arquivadas"). */
 export async function listChats(userId: string): Promise<ChatSummary[]> {
   const { data, error } = await supabase
     .from("agent_chats")
-    .select("id, title, project_id, updated_at, model")
+    .select("id, title, project_id, updated_at, model, archived_at")
     .eq("user_id", userId)
+    .is("deleted_at", null)
     .order("updated_at", { ascending: false })
 
   if (error) {
@@ -276,7 +282,7 @@ export async function setChatModel(
     .update({ model, updated_at: new Date().toISOString() })
     .eq("id", chatId)
     .eq("user_id", userId)
-    .select("id, title, project_id, updated_at, model")
+    .select("id, title, project_id, updated_at, model, archived_at")
     .single()
 
   if (error) {
@@ -458,7 +464,7 @@ export async function renameChat(
     .update({ title: trimmed, updated_at: new Date().toISOString() })
     .eq("id", chatId)
     .eq("user_id", userId)
-    .select("id, title, project_id, updated_at, model")
+    .select("id, title, project_id, updated_at, model, archived_at")
     .maybeSingle()
 
   if (error) {
@@ -488,7 +494,7 @@ export async function setChatProject(
     })
     .eq("id", chatId)
     .eq("user_id", userId)
-    .select("id, title, project_id, updated_at, model")
+    .select("id, title, project_id, updated_at, model, archived_at")
     .maybeSingle()
 
   if (error) {
@@ -497,7 +503,11 @@ export async function setChatProject(
   return data as ChatSummary | null
 }
 
-/** Exclui um chat do próprio usuário (cascade em agent_messages). Chat inexistente → false. */
+/**
+ * Exclui um chat do próprio usuário — SOFT DELETE (`deleted_at`): a conversa
+ * some das listagens, mas mensagens e custos ficam no banco para a central de
+ * custo do admin (migration 0035). Chat inexistente ou já excluído → false.
+ */
 export async function deleteChat(
   chatId: string,
   userId: string,
@@ -507,14 +517,61 @@ export async function deleteChat(
 
   const { error, count } = await supabase
     .from("agent_chats")
-    .delete({ count: "exact" })
+    .update({ deleted_at: new Date().toISOString() }, { count: "exact" })
     .eq("id", chatId)
     .eq("user_id", userId)
+    .is("deleted_at", null)
 
   if (error) {
     throw new Error(`deleteChat falhou: ${error.message}`)
   }
   return (count ?? 0) > 0
+}
+
+/**
+ * Ação em massa sobre conversas do PRÓPRIO usuário (bulk da lista).
+ *
+ * Ownership por linha via filtro `user_id = userId`: ids de outros usuários,
+ * inexistentes ou já excluídos são simplesmente IGNORADOS (não 403) — a
+ * resposta informa quantas linhas foram de fato afetadas. Decisão documentada
+ * em POST /api/chats/bulk: o bulk é idempotente e não vaza a existência de
+ * chats alheios.
+ *
+ * - archive/unarchive: preenche/limpa `archived_at`;
+ * - delete: soft delete (`deleted_at`) — custo preservado (migration 0035);
+ * - move: valida ownership do projeto de destino e troca `project_id`
+ *   (null = remover do projeto).
+ */
+export async function bulkChatsAction(
+  userId: string,
+  req: BulkChatsRequest,
+): Promise<number> {
+  if (req.action === "move" && req.projectId !== null) {
+    await assertProjectOwnedOrThrow(req.projectId, userId)
+  }
+
+  const now = new Date().toISOString()
+  const patch: Record<string, unknown> =
+    req.action === "archive"
+      ? { archived_at: now }
+      : req.action === "unarchive"
+        ? { archived_at: null }
+        : req.action === "delete"
+          ? { deleted_at: now }
+          : { project_id: req.projectId }
+  // updated_at sobe via trigger trg_agent_chats_updated (migration 0001).
+
+  const { error, count } = await supabase
+    .from("agent_chats")
+    .update(patch, { count: "exact" })
+    .in("id", req.ids)
+    .eq("user_id", userId)
+    .is("deleted_at", null)
+
+  if (error) {
+    throw new Error(`bulkChatsAction (${req.action}) falhou: ${error.message}`)
+  }
+  return count ?? 0
 }
 
 /**

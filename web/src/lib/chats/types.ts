@@ -11,6 +11,8 @@ export interface ChatSummary {
   updated_at: string
   /** Modelo pinado nesta conversa (id do catálogo) — null segue o default. */
   model: string | null
+  /** Conversa arquivada (seção "Arquivadas"); null/ausente = ativa. */
+  archived_at?: string | null
   /** Soma do custo das mensagens (USD). */
   cost_usd?: number
 }

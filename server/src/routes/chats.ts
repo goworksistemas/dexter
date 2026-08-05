@@ -7,7 +7,9 @@ import type { FastifyInstance } from "fastify"
 import { z } from "zod"
 
 import { NotFoundError, resolveUser } from "../services/auth.js"
+import { parseBulkChatsBody } from "../services/chat-bulk.js"
 import {
+  bulkChatsAction,
   deleteChat,
   getChatTail,
   getChatToolCalls,
@@ -160,6 +162,30 @@ export default async function chatsRoutes(app: FastifyInstance): Promise<void> {
       throw new NotFoundError("Conversa não encontrada.")
     }
     return reply.code(204).send()
+  })
+
+  /**
+   * Ações em massa na lista de conversas:
+   * `{ ids: uuid[] (1..100), action: "archive" | "unarchive" | "delete" |
+   * "move", projectId?: uuid | null }` — projectId obrigatório (uuid ou null)
+   * só em "move".
+   *
+   * Ownership: só age nas conversas do PRÓPRIO usuário. Ids de outros
+   * usuários, inexistentes ou já excluídos são ignorados em silêncio (não
+   * 403) — idempotente e sem vazar existência de chats alheios; `affected`
+   * na resposta diz quantas linhas mudaram de verdade.
+   *
+   * "delete" é soft delete: a conversa some da lista, mas mensagens e custos
+   * ficam no banco para a central de custo do admin (migration 0035).
+   */
+  app.post("/api/chats/bulk", async (request) => {
+    const { userId } = await resolveUser(request)
+    const parsed = parseBulkChatsBody(request.body)
+    if (!parsed.ok) {
+      throw badRequest(parsed.error)
+    }
+    const affected = await bulkChatsAction(userId, parsed.value)
+    return { affected }
   })
 
   const truncateBodySchema = z

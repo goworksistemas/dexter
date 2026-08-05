@@ -16,6 +16,7 @@ export { useChatStepsHistory } from "./use-chat-steps"
 export { useChatModel } from "./use-chat-model"
 export { formatarDuracao } from "./run-steps"
 export type { RunProgress, RunStep, RunStepStatus } from "./run-steps"
+export type { BulkChatAction } from "./api"
 export type { ChatMessageRecord, ChatSummary } from "./types"
 export {
   useChatActions,

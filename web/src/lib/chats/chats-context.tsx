@@ -18,6 +18,7 @@ import { useAuth } from "@/providers/auth-provider"
 import { useProjects } from "@/lib/projects"
 import { stripArtifactAppendix } from "@/lib/artifacts/context-inject"
 import {
+  bulkChats as bulkChatsApi,
   deleteChat as deleteChatApi,
   fetchChatMessages,
   fetchChatMessagesWithRetry,
@@ -26,6 +27,7 @@ import {
   moveChatToProject as moveChatToProjectApi,
   renameChat as renameChatApi,
   setChatModel as setChatModelApi,
+  type BulkChatAction,
 } from "./api"
 import { chatRunsStore, runSnapshotToThreadMessages } from "./chat-runs-store"
 import {
@@ -89,6 +91,17 @@ interface ChatsContextValue {
   setChatModel: (id: string, model: string) => Promise<void>
   deleteChat: (id: string) => Promise<void>
   moveChatToProject: (id: string, projectId: string | null) => Promise<void>
+  /**
+   * Ação em massa (arquivar/desarquivar/excluir/mover) — otimista: a lista
+   * muda na hora e volta ao estado anterior se o POST falhar. Devolve quantas
+   * conversas o servidor afetou de verdade. Excluir é soft delete: a conversa
+   * some da lista, mas o histórico de custo fica preservado no banco.
+   */
+  bulkChats: (
+    action: BulkChatAction,
+    ids: readonly string[],
+    projectId?: string | null,
+  ) => Promise<number>
   refreshChats: () => void
   registerRuntime: (runtime: AssistantRuntime | null) => void
 }
@@ -895,6 +908,59 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
     [activeChatId, navigate],
   )
 
+  const bulkChats = React.useCallback(
+    async (
+      action: BulkChatAction,
+      ids: readonly string[],
+      projectId?: string | null,
+    ): Promise<number> => {
+      const idSet = new Set(ids)
+      if (idSet.size === 0) return 0
+      const agora = new Date().toISOString()
+
+      // Otimista com rollback: guarda a lista anterior antes de aplicar.
+      let anterior: ChatSummary[] = []
+      setChats((prev) => {
+        anterior = prev
+        if (action === "delete") return prev.filter((c) => !idSet.has(c.id))
+        return prev.map((c) => {
+          if (!idSet.has(c.id)) return c
+          if (action === "archive") return { ...c, archived_at: agora }
+          if (action === "unarchive") return { ...c, archived_at: null }
+          return { ...c, project_id: projectId ?? null }
+        })
+      })
+
+      try {
+        const { affected } = await bulkChatsApi([...idSet], action, projectId)
+
+        if (action === "delete") {
+          // Mesma limpeza do deleteChat individual — runs e cache não podem
+          // sobreviver a uma conversa excluída. Só depois do POST confirmar,
+          // senão o rollback devolveria conversas sem run/cache.
+          for (const id of idSet) {
+            chatRunsStore.cancelRun(id)
+            chatRunsStore.discardRun(id)
+            clearCachedHistory(id)
+          }
+          if (idSet.has(activeChatId)) {
+            newChat(activeProjectId)
+          }
+        } else if (action === "move" && idSet.has(activeChatId)) {
+          const destino = projectId ?? null
+          pendingProjectIdRef.current = destino
+          skipUrlSyncRef.current = true
+          navigate(pathForChat(activeChatId, destino), { replace: true })
+        }
+        return affected
+      } catch (err) {
+        setChats(anterior)
+        throw err
+      }
+    },
+    [activeChatId, newChat, activeProjectId, navigate],
+  )
+
   const activeChat = chats.find((c) => c.id === activeChatId)
 
   const value = React.useMemo<ChatsContextValue>(
@@ -920,6 +986,7 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
       setChatModel,
       deleteChat,
       moveChatToProject,
+      bulkChats,
       refreshChats,
       registerRuntime,
     }),
@@ -945,6 +1012,7 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
       setChatModel,
       deleteChat,
       moveChatToProject,
+      bulkChats,
       refreshChats,
       registerRuntime,
     ],

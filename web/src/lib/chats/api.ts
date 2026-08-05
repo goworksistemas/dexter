@@ -294,6 +294,41 @@ export async function moveChatToProject(
   return response.json()
 }
 
+export type BulkChatAction = "archive" | "unarchive" | "delete" | "move"
+
+/**
+ * Ação em massa na lista de conversas (`POST /api/chats/bulk`).
+ * `projectId` só vale para `action="move"` (null = remover do projeto).
+ * O servidor só age nos chats do próprio usuário (ids alheios são ignorados)
+ * e devolve quantas conversas foram de fato afetadas. "delete" é soft delete
+ * — o histórico de custo fica preservado no banco.
+ */
+export async function bulkChats(
+  ids: readonly string[],
+  action: BulkChatAction,
+  projectId?: string | null,
+): Promise<{ affected: number }> {
+  const body: Record<string, unknown> = { ids, action }
+  if (action === "move") body.projectId = projectId ?? null
+
+  const response = await fetch(`${BASE_URL}/chats/bulk`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await authHeaders()),
+    },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    if (response.status === 404) throw new Error("Projeto não encontrado.")
+    if (response.status === 403) {
+      throw new Error("Sem permissão para estas conversas.")
+    }
+    throw new Error(`POST /api/chats/bulk respondeu ${response.status}`)
+  }
+  return response.json()
+}
+
 /** Exclui uma conversa (`DELETE /api/chats/:id`). */
 export async function deleteChat(chatId: string): Promise<void> {
   const response = await fetch(`${BASE_URL}/chats/${chatId}`, {

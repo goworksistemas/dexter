@@ -67,7 +67,7 @@ export function useChatActions() {
   const handleDeleteChat = React.useCallback(
     async (id: string, title: string) => {
       const ok = window.confirm(
-        `Excluir a conversa "${title || "sem título"}"? Esta ação não pode ser desfeita.`,
+        `Excluir a conversa "${title || "sem título"}"? Ela some da sua lista (o histórico de custo é preservado). Esta ação não pode ser desfeita.`,
       )
       if (!ok) return
       try {

@@ -3,10 +3,16 @@ import { Share2 } from "lucide-react"
 import { Link, useLocation, useNavigate } from "react-router-dom"
 import { toast } from "sonner"
 
+import { ChatBulkActionsBar } from "@/components/chat/bulk-actions"
 import { ChatActionsOverlays } from "@/components/chat/chat-actions"
 import { useMediaQuery } from "@/hooks/use-media-query"
 import { useSidebar } from "@/hooks/use-sidebar"
-import { useChatActions, useChatRuns, useChats } from "@/lib/chats"
+import {
+  useChatActions,
+  useChatRuns,
+  useChats,
+  type ChatSummary,
+} from "@/lib/chats"
 import { useAuth } from "@/providers/auth-provider"
 import { fetchPendingChatShares } from "@/lib/share/api"
 import { cn } from "@/lib/utils"
@@ -69,6 +75,7 @@ export function Sidebar() {
     newChat,
     selectChat,
     refreshChats,
+    bulkChats,
   } = useChats()
   const chatActions = useChatActions()
   const { runningChatIds } = useChatRuns()
@@ -95,9 +102,52 @@ export function Sidebar() {
     return chats.filter((c) => (c.title || "").toLowerCase().includes(q))
   }, [chats, query])
 
-  const visibleChats = React.useMemo(
-    () => filteredChats.slice(0, RECENT_LIMIT),
+  const activeFiltered = React.useMemo(
+    () => filteredChats.filter((c) => !c.archived_at),
     [filteredChats],
+  )
+  const archivedFiltered = React.useMemo(
+    () => filteredChats.filter((c) => Boolean(c.archived_at)),
+    [filteredChats],
+  )
+
+  const visibleChats = React.useMemo(
+    () => activeFiltered.slice(0, RECENT_LIMIT),
+    [activeFiltered],
+  )
+
+  // Seleção em massa: entra pelo checkbox no hover das linhas; a barra de
+  // ações aparece acima do rodapé enquanto houver conversa selecionada.
+  const [selecionadas, setSelecionadas] = React.useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
+  const chatsSelecionados = React.useMemo(
+    () => chats.filter((c) => selecionadas.has(c.id)),
+    [chats, selecionadas],
+  )
+  const toggleSelecionada = React.useCallback((id: string) => {
+    setSelecionadas((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+  const limparSelecao = React.useCallback(() => {
+    setSelecionadas(new Set())
+  }, [])
+
+  const desarquivar = React.useCallback(
+    (chat: ChatSummary) => {
+      void bulkChats("unarchive", [chat.id])
+        .then(() => toast.success("Conversa desarquivada."))
+        .catch((err) => {
+          toast.error(
+            err instanceof Error ? err.message : "Falha ao desarquivar.",
+          )
+        })
+    },
+    [bulkChats],
   )
 
   // Foco no campo assim que a busca abre (inclusive vindo do rail).
@@ -216,7 +266,8 @@ export function Sidebar() {
               <PendingSharesSidebarHint onNavigate={closeOnMobile} />
               <ChatsSection
                 chats={visibleChats}
-                total={filteredChats.length}
+                archivedChats={archivedFiltered}
+                total={activeFiltered.length}
                 isLoading={isLoadingChats}
                 error={chatsError}
                 activeChatId={activeChatId}
@@ -230,6 +281,11 @@ export function Sidebar() {
                   onCommit: (id) => void chatActions.commitRename(id),
                   onCancel: chatActions.cancelRename,
                 }}
+                selection={{
+                  ativa: selecionadas.size > 0,
+                  selecionadas,
+                  onToggle: toggleSelecionada,
+                }}
                 onRetry={() => refreshChats()}
                 onSelect={(chat) => {
                   selectChat(chat.id)
@@ -237,8 +293,29 @@ export function Sidebar() {
                 }}
                 onOpenMenu={chatActions.openChatMenu}
                 onNavigate={closeOnMobile}
+                onUnarchive={desarquivar}
               />
             </div>
+
+            {chatsSelecionados.length > 0 ? (
+              <div className="shrink-0 px-2 pb-1">
+                <ChatBulkActionsBar
+                  compact
+                  selecionadas={chatsSelecionados}
+                  totalVisiveis={visibleChats.length}
+                  onSelecionarTodas={() =>
+                    setSelecionadas(
+                      (prev) =>
+                        new Set([
+                          ...prev,
+                          ...visibleChats.map((c) => c.id),
+                        ]),
+                    )
+                  }
+                  onLimpar={limparSelecao}
+                />
+              </div>
+            ) : null}
 
             <SidebarFooter
               user={user}
