@@ -61,6 +61,36 @@ export function modelContextHint(model: ModelInfo): string | null {
   return base
 }
 
+const MES_CURTO = [
+  "jan",
+  "fev",
+  "mar",
+  "abr",
+  "mai",
+  "jun",
+  "jul",
+  "ago",
+  "set",
+  "out",
+  "nov",
+  "dez",
+] as const
+
+/**
+ * Data de lançamento em linguagem de card: "lançado em mar/2026".
+ * `null` quando o catálogo não informa (ou a data é inválida) — o card
+ * simplesmente omite o trecho, sem inventar.
+ */
+export function modelReleaseHint(
+  model: Pick<ModelInfo, "releasedAt">,
+): string | null {
+  if (!model.releasedAt) return null
+  const t = Date.parse(model.releasedAt)
+  if (!Number.isFinite(t)) return null
+  const d = new Date(t)
+  return `lançado em ${MES_CURTO[d.getUTCMonth()]}/${d.getUTCFullYear()}`
+}
+
 export function formatUsdPerMillion(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return "—"
   return `$${n.toFixed(2)}`

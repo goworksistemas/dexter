@@ -10,9 +10,11 @@
 
 const MARCA = Symbol.for("dexter.erroSanitizado")
 
-/** Error cuja `message` já pode ir direto ao cliente (texto curado, sem internals). */
-export function erroSanitizado(message: string): Error {
-  const err = new Error(message)
+/** Error cuja `message` já pode ir direto ao cliente (texto curado, sem
+ * internals). `cause` opcional preserva o erro cru para o log estruturado. */
+export function erroSanitizado(message: string, cause?: unknown): Error {
+  const err =
+    cause !== undefined ? new Error(message, { cause }) : new Error(message)
   ;(err as unknown as Record<symbol, boolean>)[MARCA] = true
   return err
 }

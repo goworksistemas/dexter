@@ -1129,12 +1129,18 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         "erro no streaming do chat",
       )
 
+      // Para a detecção de cota vai também o erro CRU do provider (cause) —
+      // a mensagem sanitizada em português não carrega os termos de billing.
       const errMsg = err instanceof Error ? err.message : String(err)
+      const errRaw =
+        err instanceof Error && typeof err.cause === "string"
+          ? `${err.message}\n${err.cause}`
+          : errMsg
       void recordQuotaError(
         userId,
         modelInfo.provider,
         modelKeySource,
-        errMsg,
+        errRaw,
       )
 
       await persistirResposta()

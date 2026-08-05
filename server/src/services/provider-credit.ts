@@ -3,19 +3,16 @@
  */
 import { KEY_PROVIDERS, type KeyProvider } from "./llm-keys.js"
 import { gastoDoMesUsd } from "./run-budget.js"
+import { isQuotaError } from "../lib/quota-error.js"
 import { supabase } from "../lib/supabase.js"
 import type { ModelProvider } from "./model-store.js"
 import type { ModelKeySource } from "../llm/model-catalog-meta.js"
 
+export { isQuotaError }
+
 export type CreditStatus = "available" | "low" | "depleted" | "unknown"
 
 const BILLED = new Set<string>(KEY_PROVIDERS)
-
-export function isQuotaError(message: string): boolean {
-  return /insufficient.?quota|quota.?exceeded|billing|credit.?balance|exceeded.*limit|402|429|rate.?limit/i.test(
-    message,
-  )
-}
 
 export async function markUserProviderCredit(
   userId: string,

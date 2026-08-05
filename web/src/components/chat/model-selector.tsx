@@ -47,6 +47,7 @@ import {
   modelPricingTagBrl,
   modelProfileClass,
   modelProfileLabel,
+  modelReleaseHint,
   providerShortLabel,
   type ModelInfo,
   type ModelProvider,
@@ -175,6 +176,7 @@ function ModelPickRow({
 }) {
   const caps = modelCaps(model)
   const ctx = modelContextHint(model)
+  const lancamento = modelReleaseHint(model)
   const prov = providerShortLabel(model)
   const tier = modelCostTier(model)
   const price = modelPricingHeadlineBrl(model, rate)
@@ -238,6 +240,14 @@ function ModelPickRow({
                 ·
               </span>
               <span>{ctx}</span>
+            </>
+          ) : null}
+          {lancamento ? (
+            <>
+              <span aria-hidden className="text-border">
+                ·
+              </span>
+              <span>{lancamento}</span>
             </>
           ) : null}
         </span>

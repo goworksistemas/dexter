@@ -7,9 +7,14 @@ import type { Provider } from "../llm/models.js"
 import { responseMaxTokens } from "../llm/models.js"
 import { getGlobalKey } from "../services/llm-keys.js"
 import type { AnthropicTool } from "../systems/tools.js"
+import {
+  formatProviderHttpError,
+  sanitizeSchemaForProvider,
+  type OcProvider,
+} from "./openai-compatible-helpers.js"
 
-/** Provedores servidos pelo protocolo Chat Completions da OpenAI. */
-export type OcProvider = "openai" | "gemini" | "deepseek" | "xai"
+export { formatProviderHttpError, sanitizeSchemaForProvider }
+export type { OcProvider }
 
 export type OcContentPart =
   | { type: "text"; text: string }
@@ -131,13 +136,13 @@ async function endpoint(
   }
 }
 
-function toOpenAiTools(tools: AnthropicTool[]) {
+function toOpenAiTools(tools: AnthropicTool[], provider: OcProvider) {
   return tools.map((t) => ({
     type: "function" as const,
     function: {
       name: t.name,
       description: t.description,
-      parameters: t.input_schema,
+      parameters: sanitizeSchemaForProvider(t.input_schema, provider),
     },
   }))
 }
@@ -201,7 +206,7 @@ export async function streamOpenAiCompatible(
   applyTokenLimit(body, opts.provider, opts.model, maxTokens)
   const hasTools = Boolean(opts.allowTools && opts.tools?.length)
   if (hasTools) {
-    body.tools = toOpenAiTools(opts.tools!)
+    body.tools = toOpenAiTools(opts.tools!, opts.provider)
   }
   applyReasoningForTools(body, opts.provider, opts.model, hasTools)
 
@@ -213,7 +218,12 @@ export async function streamOpenAiCompatible(
   })
   if (!res.ok || !res.body) {
     const errText = await res.text().catch(() => "")
-    throw new Error(formatProviderHttpError(opts.provider, opts.model, res.status, errText))
+    // `cause` carrega o corpo cru do provider para o log estruturado da rota
+    // (a mensagem do Error é a versão curada que pode ir ao cliente).
+    throw new Error(
+      formatProviderHttpError(opts.provider, opts.model, res.status, errText),
+      { cause: `${opts.provider} HTTP ${res.status}: ${errText.slice(0, 2000)}` },
+    )
   }
 
   const reader = res.body.getReader()
@@ -308,23 +318,3 @@ export function isOpenAiCompatibleProvider(p: Provider): p is OcProvider {
   return p === "openai" || p === "gemini" || p === "deepseek" || p === "xai"
 }
 
-function formatProviderHttpError(
-  provider: string,
-  model: string,
-  status: number,
-  errText: string,
-): string {
-  const lower = errText.toLowerCase()
-  if (
-    status === 404 &&
-    (lower.includes("no longer available") ||
-      lower.includes("not found") ||
-      lower.includes("is not found"))
-  ) {
-    return (
-      `Modelo "${model}" não está mais disponível na ${provider}. ` +
-      `Escolha outro modelo no seletor (ex.: Gemini 2.5/3.x Flash).`
-    )
-  }
-  return `${provider} HTTP ${status}: ${errText.slice(0, 240)}`
-}

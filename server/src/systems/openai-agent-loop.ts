@@ -3,6 +3,7 @@
  * Reutiliza as mesmas tools/executeTool do loop Anthropic.
  */
 import { config } from "../config.js"
+import { erroSanitizado } from "../lib/erro-modelo.js"
 import {
   buildOcUserContent,
   streamOpenAiCompatible,
@@ -79,6 +80,28 @@ export interface OpenAiAgentLoopOptions {
 function truncarToolResult(raw: string, max: number): string {
   if (raw.length <= max) return raw
   return `${raw.slice(0, max)}\n…[truncado ${raw.length - max} chars]`
+}
+
+/**
+ * Traduz a falha do provider para o texto que VAI ao cliente. Erros HTTP já
+ * chegam curados em português (formatProviderHttpError); aqui cobrimos rede,
+ * timeout e contexto — mesmo espírito do `mensagemApiError` do loop Anthropic.
+ * Sem isto a rota /api/chat re-filtrava a mensagem por regex em inglês e o
+ * usuário recebia sempre o fallback genérico "Não consegui concluir…".
+ */
+function mensagemApiErrorOc(err: unknown): string {
+  if (!(err instanceof Error)) return "Erro desconhecido na API do modelo."
+  const msg = err.message || "Erro na API do modelo."
+  if (/timeout|timed out|ETIMEDOUT|AbortError/i.test(msg)) {
+    return "A chamada ao modelo demorou demais e foi interrompida."
+  }
+  if (/fetch failed|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up/i.test(msg)) {
+    return "Não consegui conectar ao provedor do modelo. Tente novamente em instantes."
+  }
+  if (/context.?length|too many tokens|maximum context|input token count/i.test(msg)) {
+    return "O contexto desta conversa ficou grande demais após as consultas. Tente novamente com um pedido mais focado."
+  }
+  return truncar(msg, 400)
 }
 
 const PROMPT_FINAL_FORCADO =
@@ -403,8 +426,12 @@ export async function runOpenAiAgentLoop(
       throw err
     }
     endReason = "api_error"
-    const msg = err instanceof Error ? err.message : String(err)
-    throw new Error(truncar(msg, 400))
+    // Sanitizado: a rota repassa a mensagem como está ao cliente; o erro cru
+    // (corpo do provider) segue no `cause` para o log estruturado.
+    throw erroSanitizado(
+      mensagemApiErrorOc(err),
+      err instanceof Error ? (err.cause ?? err.message) : err,
+    )
   }
 
   return {

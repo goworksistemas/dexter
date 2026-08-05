@@ -87,7 +87,8 @@ function buildKbTools(): AnthropicTool[] {
             description: `Filtro opcional de categoria: ${KB_CATEGORIES.join(" | ")}.`,
           },
         },
-        required: [],
+        // Sem `required`: todos os parâmetros são opcionais e o validador do
+        // Gemini rejeita `required: []` (400 no request inteiro).
       },
     },
   ]
@@ -288,13 +289,16 @@ export async function buildTools(
       for (const p of t.params) {
         properties[p.name] = { type: p.type, description: p.description }
       }
+      // `required` só quando não-vazio: o Gemini (OpenAI-compat) devolve 400
+      // para `required: []` em qualquer tool do request.
+      const required = t.params.filter((p) => p.required).map((p) => p.name)
       tools.push({
         name: toolName(a.slug, t.fn),
         description: `[${a.label}] ${t.description}`,
         input_schema: {
           type: "object",
           properties,
-          required: t.params.filter((p) => p.required).map((p) => p.name),
+          ...(required.length > 0 ? { required } : {}),
         },
       })
     }

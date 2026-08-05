@@ -40,6 +40,8 @@ export interface ModelInfo {
   keyLast4?: string
   inputTokenLimit?: number | null
   maxOutputTokens?: number | null
+  /** Data de lançamento do modelo (ISO), vinda do catálogo do server. */
+  releasedAt?: string | null
 }
 
 export interface ModelsResponse {

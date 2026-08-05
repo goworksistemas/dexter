@@ -52,6 +52,7 @@ export {
   modelPricingTagBrl,
   modelProfileClass,
   modelProfileLabel,
+  modelReleaseHint,
   pricingParts,
   providerShortLabel,
 } from "./model-meta"
