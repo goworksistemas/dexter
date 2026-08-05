@@ -308,6 +308,33 @@ export async function deleteChat(chatId: string): Promise<void> {
 }
 
 /**
+ * Retry ("Tentar novamente"): apaga o que veio depois da última mensagem do
+ * usuário (`POST /api/chats/:id/truncate` com `afterLastUserText`).
+ * Idempotente e por TEXTO do turno — não depende do id da bolha de erro, que
+ * costuma ser local (o servidor não grava resposta vazia de run falhado).
+ */
+export async function truncateChatAfterLastUser(
+  chatId: string,
+  userText: string,
+): Promise<void> {
+  const response = await fetch(`${BASE_URL}/chats/${chatId}/truncate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await authHeaders()),
+    },
+    body: JSON.stringify({ afterLastUserText: userText }),
+  })
+  if (!response.ok) {
+    if (response.status === 404) throw new Error("Conversa não encontrada.")
+    if (response.status === 403) throw new Error("Sem permissão para esta conversa.")
+    throw new Error(
+      `POST /api/chats/${chatId}/truncate respondeu ${response.status}`,
+    )
+  }
+}
+
+/**
  * Apaga a mensagem e tudo depois dela
  * (`POST /api/chats/:id/truncate` com `deleteFromMessageId`).
  */

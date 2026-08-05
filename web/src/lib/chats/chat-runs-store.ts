@@ -1,7 +1,13 @@
 /**
  * Store de gerações SSE por `chatId`, independente do ciclo de vida do
  * `ChatThread` / `useLocalRuntime`. Trocar de conversa ou desmontar a UI
- * NÃO aborta o fetch — só o cancelamento explícito (botão Parar).
+ * NÃO aborta o fetch — só o cancelamento explícito (botão Parar), que também
+ * cancela o run no servidor.
+ *
+ * O run em si vive no SERVIDOR (registro de runs do AgentCore): se a conexão
+ * cair no meio (rede, proxy), o store reanexa via `resumeStream` — o replay
+ * traz o texto completo; e ao reabrir uma conversa com geração ainda viva
+ * (F5, aba nova), `resumeRunSeAtivo` retoma o acompanhamento de onde parou.
  */
 import type { ThreadMessageLike } from "@assistant-ui/react"
 
@@ -11,6 +17,8 @@ import type {
   ArtifactWire,
   ChatAttachment,
   ChatMessage,
+  ChatRunStatusWire,
+  ChatStreamChunk,
   ChatTransport,
 } from "@/lib/agentcore/contract"
 import { stripArtifactAppendix } from "@/lib/artifacts/context-inject"
@@ -27,6 +35,39 @@ export type ChatRunStatus = "running" | "complete" | "error" | "cancelled"
 const STALL_WARN_MS = 90_000
 /** Sem evento SSE → aborta como erro (run órfão / servidor morto). */
 const STALL_FAIL_MS = 180_000
+
+/** Tentativas de reanexar depois de uma queda de conexão no meio do run. */
+const MAX_TENTATIVAS_REANEXACAO = 3
+/** Atraso base entre tentativas (backoff exponencial: 1s, 2s, 4s). */
+const ATRASO_REANEXACAO_MS = 1_000
+const MSG_QUEDA_SEM_REANEXAR =
+  "A conexão com o AgentCore caiu e não foi possível reanexar. " +
+  "Recarregue a conversa — se a geração terminou, a resposta está salva."
+
+/** Espera `ms`, retornando mais cedo se o run for abortado nesse meio tempo. */
+function esperar(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve()
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener("abort", onAbort, { once: true })
+  })
+}
+
+/** Resultado do consumo de uma fonte de chunks SSE. */
+type ResultadoConsumo =
+  | { tipo: "assentado" }
+  /** Conexão caiu sem terminal — o run pode continuar vivo no servidor. */
+  | { tipo: "queda" }
 
 export interface ChatRunMessage {
   id: string
@@ -131,6 +172,34 @@ export class ChatRunsStore {
   }
 
   cancelRun(chatId: string): void {
+    this.cancelarLocal(chatId)
+
+    // Cancela também no servidor: a desconexão do SSE não aborta mais o run
+    // — sem este POST a geração continuaria em segundo plano.
+    void this.transport.cancelRun(chatId).catch(() => {
+      // Sem run ativo no servidor (ou rede fora) — nada a cancelar.
+    })
+  }
+
+  /**
+   * Cancela e AGUARDA o servidor assentar o run — o 204 do cancel só volta
+   * depois de o run antigo persistir o que tinha (terminal publicado). É o
+   * que o "Tentar novamente" usa antes de truncar o histórico: sem a espera,
+   * a resposta parcial do run cancelado poderia ser gravada DEPOIS do
+   * truncate e ressuscitar como lixo. Cobre também run fantasma: mesmo sem
+   * nada rodando localmente, cancela o que o servidor conhecer (404 = nada).
+   */
+  async cancelarEAguardarServidor(chatId: string): Promise<void> {
+    this.cancelarLocal(chatId)
+    try {
+      await this.transport.cancelRun(chatId)
+    } catch {
+      // Sem run no servidor ou rede fora — o retry segue mesmo assim.
+    }
+  }
+
+  /** Encerra a UI e aborta o fetch local — parte síncrona do cancelamento. */
+  private cancelarLocal(chatId: string): void {
     const run = this.runs.get(chatId)
     const controller = this.controllers.get(chatId)
 
@@ -409,8 +478,6 @@ export class ChatRunsStore {
     controller: AbortController,
   ): Promise<void> {
     const { chatId } = params
-    const { signal } = controller
-    let texto = ""
 
     // No fio vai SÓ a mensagem nova (o histórico o AgentCore lê do banco).
     // Sem apêndice legado de artefatos — eles vão só em `context`.
@@ -444,20 +511,208 @@ export class ChatRunsStore {
           }
         : undefined
 
+    const fonte = this.transport.stream(
+      { threadId: chatId, message: mensagemNova, context },
+      controller.signal,
+    )
+    await this.consumirComReanexacao(chatId, assistantMessageId, controller, fonte)
+  }
+
+  /**
+   * Reanexa a UI num run que continua vivo no SERVIDOR (F5, aba nova) —
+   * chamado ao abrir uma conversa, com o histórico já persistido como base
+   * do snapshot; a bolha do assistente em geração é acrescentada aqui.
+   * Devolve `true` se reanexou (o snapshot assume a thread via subscribe).
+   */
+  async resumeRunSeAtivo(
+    chatId: string,
+    historico: ChatRunMessage[],
+  ): Promise<boolean> {
+    if (this.runs.get(chatId)?.status === "running") return false
+
+    let statusServidor: ChatRunStatusWire
     try {
-      for await (const chunk of this.transport.stream(
-        { threadId: chatId, message: mensagemNova, context },
-        signal,
-      )) {
+      statusServidor = await this.transport.fetchRunStatus(chatId)
+    } catch {
+      // Servidor inacessível — o histórico do banco já está na tela.
+      return false
+    }
+    if (!statusServidor.active) return false
+    // Um startRun pode ter começado enquanto o status carregava.
+    if (this.runs.get(chatId)?.status === "running") return false
+
+    this.clearStall(chatId)
+    this.cancelTextUi(chatId)
+
+    const assistantMessageId = crypto.randomUUID()
+    const messages: ChatRunMessage[] = [
+      ...historico,
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        content: "",
+        createdAt: new Date().toISOString(),
+      },
+    ]
+    const snapshot: ChatRunSnapshot = {
+      chatId,
+      status: "running",
+      messages,
+      assistantText: "",
+      assistantMessageId,
+      progress: progressoVazio(),
+    }
+    this.runs.set(chatId, snapshot)
+
+    const controller = new AbortController()
+    this.controllers.set(chatId, controller)
+    this.touchActivity(chatId)
+    this.startStallWatch(chatId, assistantMessageId, controller)
+    this.notify()
+
+    void this.consumirComReanexacao(
+      chatId,
+      assistantMessageId,
+      controller,
+      this.transport.resumeStream(chatId, controller.signal),
+    )
+    return true
+  }
+
+  /**
+   * Consome a fonte até assentar; em queda de conexão, tenta reanexar no run
+   * do servidor quantas vezes forem necessárias (cada reanexação bem-sucedida
+   * zera as tentativas — só desiste depois de MAX_TENTATIVAS_REANEXACAO
+   * quedas seguidas sem conseguir voltar).
+   */
+  private async consumirComReanexacao(
+    chatId: string,
+    assistantMessageId: string,
+    controller: AbortController,
+    fonteInicial: AsyncIterable<ChatStreamChunk>,
+  ): Promise<void> {
+    let fonte = fonteInicial
+    for (;;) {
+      const resultado = await this.consumirFonte(
+        chatId,
+        assistantMessageId,
+        controller,
+        fonte,
+      )
+      if (resultado.tipo === "assentado") return
+      const proxima = await this.reanexar(chatId, assistantMessageId, controller)
+      if (!proxima) return
+      fonte = proxima
+    }
+  }
+
+  /**
+   * Depois de uma queda: re-checa o estado do run no servidor e devolve a
+   * fonte reanexada, ou `null` quando o run assentou por outro caminho (fim
+   * no servidor, cancelamento, run substituído) — nesses casos o settle já
+   * foi feito aqui dentro quando cabia.
+   */
+  private async reanexar(
+    chatId: string,
+    assistantMessageId: string,
+    controller: AbortController,
+  ): Promise<AsyncIterable<ChatStreamChunk> | null> {
+    const { signal } = controller
+
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_REANEXACAO; tentativa++) {
+      if (!this.isCurrent(chatId, assistantMessageId)) return null
+      if (this.runs.get(chatId)?.status !== "running") return null
+      if (signal.aborted) {
+        this.settle(chatId, assistantMessageId, { status: "cancelled" })
+        return null
+      }
+
+      await esperar(ATRASO_REANEXACAO_MS * 2 ** (tentativa - 1), signal)
+      if (!this.isCurrent(chatId, assistantMessageId)) return null
+      if (this.runs.get(chatId)?.status !== "running") return null
+      if (signal.aborted) {
+        this.settle(chatId, assistantMessageId, { status: "cancelled" })
+        return null
+      }
+
+      let statusServidor: ChatRunStatusWire
+      try {
+        statusServidor = await this.transport.fetchRunStatus(chatId)
+      } catch {
+        // Rede ainda fora — conta a tentativa e insiste.
+        continue
+      }
+
+      if (statusServidor.active) {
+        // O replay traz o texto completo desde o início — o primeiro flush
+        // substitui o parcial local, sem duplicar (progresso é idempotente
+        // por id de passo).
+        this.touchActivity(chatId)
+        return this.transport.resumeStream(chatId, signal)
+      }
+
+      // O run terminou enquanto a conexão esteve fora. A resposta completa
+      // está no banco — o settle dispara o sync que troca o parcial por ela.
+      if (
+        statusServidor.status === "done" ||
+        statusServidor.status === "cancelled"
+      ) {
+        this.settle(chatId, assistantMessageId, { status: "complete" })
+      } else if (statusServidor.status === "error") {
+        const msg = "A geração terminou com erro no servidor."
+        this.settle(chatId, assistantMessageId, {
+          status: "error",
+          error: msg,
+        })
+      } else {
+        // Servidor não conhece o run (reiniciou, ou a janela de reanexação
+        // passou) — não dá para afirmar que a resposta existe.
+        this.settleQueda(chatId, assistantMessageId)
+      }
+      return null
+    }
+
+    if (
+      this.isCurrent(chatId, assistantMessageId) &&
+      this.runs.get(chatId)?.status === "running"
+    ) {
+      this.settleQueda(chatId, assistantMessageId)
+    }
+    return null
+  }
+
+  /** Settle de queda sem reanexação: erro com o parcial preservado. */
+  private settleQueda(chatId: string, assistantMessageId: string): void {
+    const parcial = this.runs.get(chatId)?.assistantText ?? ""
+    this.settle(chatId, assistantMessageId, {
+      assistantText: parcial
+        ? `${parcial}\n\n_${MSG_QUEDA_SEM_REANEXAR}_`
+        : `_${MSG_QUEDA_SEM_REANEXAR}_`,
+      status: "error",
+      error: MSG_QUEDA_SEM_REANEXAR,
+    })
+  }
+
+  private async consumirFonte(
+    chatId: string,
+    assistantMessageId: string,
+    controller: AbortController,
+    fonte: AsyncIterable<ChatStreamChunk>,
+  ): Promise<ResultadoConsumo> {
+    const { signal } = controller
+    let texto = ""
+
+    try {
+      for await (const chunk of fonte) {
         // Abandonar o loop sem abortar deixaria o fetch/SSE aberto no servidor.
         if (!this.isCurrent(chatId, assistantMessageId)) {
           controller.abort()
-          return
+          return { tipo: "assentado" }
         }
         // Parar já settled — descarta o resto do SSE.
         if (this.runs.get(chatId)?.status !== "running") {
           controller.abort()
-          return
+          return { tipo: "assentado" }
         }
         this.touchActivity(chatId)
 
@@ -470,6 +725,12 @@ export class ChatRunsStore {
         } else if (chunk.type === "progress") {
           this.applyProgress(chatId, assistantMessageId, chunk.event)
         } else if (chunk.type === "error") {
+          if (chunk.retriable && !signal.aborted) {
+            // Queda de rede/proxy — o run pode continuar vivo no servidor.
+            // Consolida o parcial na UI e deixa a reanexação decidir.
+            this.flushPendingText(chatId, assistantMessageId)
+            return { tipo: "queda" }
+          }
           texto = texto
             ? `${texto}\n\n_Erro: ${chunk.message}_`
             : `_Erro: ${chunk.message}_`
@@ -479,20 +740,24 @@ export class ChatRunsStore {
             error: chunk.message,
           })
           controller.abort()
-          return
+          return { tipo: "assentado" }
         } else if (chunk.type === "done") {
           this.settle(chatId, assistantMessageId, {
             assistantText: texto,
             status: "complete",
           })
           controller.abort()
-          return
+          return { tipo: "assentado" }
         }
       }
 
-      if (!this.isCurrent(chatId, assistantMessageId)) return
+      if (!this.isCurrent(chatId, assistantMessageId)) {
+        return { tipo: "assentado" }
+      }
       // cancelRun já pode ter settled — não sobrescreve.
-      if (this.runs.get(chatId)?.status !== "running") return
+      if (this.runs.get(chatId)?.status !== "running") {
+        return { tipo: "assentado" }
+      }
 
       if (signal.aborted) {
         this.settle(chatId, assistantMessageId, {
@@ -506,9 +771,14 @@ export class ChatRunsStore {
           error: texto ? undefined : "Stream encerrado sem resposta.",
         })
       }
+      return { tipo: "assentado" }
     } catch (err) {
-      if (!this.isCurrent(chatId, assistantMessageId)) return
-      if (this.runs.get(chatId)?.status !== "running") return
+      if (!this.isCurrent(chatId, assistantMessageId)) {
+        return { tipo: "assentado" }
+      }
+      if (this.runs.get(chatId)?.status !== "running") {
+        return { tipo: "assentado" }
+      }
       if (signal.aborted) {
         this.settle(chatId, assistantMessageId, {
           assistantText: texto,
@@ -524,6 +794,7 @@ export class ChatRunsStore {
           error: message,
         })
       }
+      return { tipo: "assentado" }
     }
   }
 }

@@ -38,6 +38,7 @@ import { getAccessToken } from "@/lib/supabase/auth";
 import type {
   AgentProgressEvent,
   ChatRequest,
+  ChatRunStatusWire,
   ChatStreamChunk,
   ChatTransport,
 } from "./contract";
@@ -77,6 +78,7 @@ export class AgentCoreTransport implements ChatTransport {
       });
     } catch (err) {
       if (signal.aborted) return;
+      // Falha ANTES de abrir o stream: o run nem começou — não é reanexável.
       yield { type: "error", message: describeError(err) };
       return;
     }
@@ -86,52 +88,142 @@ export class AgentCoreTransport implements ChatTransport {
       return;
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+    yield* lerStreamSse(response.body, signal);
+  }
 
+  /** Estado do run desta conversa no servidor (`GET /api/chat/:id/run`). */
+  async fetchRunStatus(threadId: string): Promise<ChatRunStatusWire> {
+    const token = await getAccessToken();
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const response = await fetch(`${this.baseUrl}/chat/${threadId}/run`, {
+      headers,
+    });
+    if (!response.ok) {
+      throw new Error(await describeHttpError(response));
+    }
+    const body = (await response.json()) as Partial<ChatRunStatusWire>;
+    return {
+      active: body.active === true,
+      status: body.status ?? null,
+    };
+  }
+
+  /**
+   * Reanexa num run em andamento (`GET /api/chat/:id/stream`): replay do que
+   * já foi gerado + eventos ao vivo. Falhas de rede e 404 (o run terminou e
+   * saiu da janela de reanexação entre a checagem e o GET) saem como erro
+   * `retriable` — quem consome re-checa o estado e decide.
+   */
+  async *resumeStream(
+    threadId: string,
+    signal: AbortSignal,
+  ): AsyncIterable<ChatStreamChunk> {
+    let response: Response;
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+      const token = await getAccessToken();
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
 
-        // Eventos SSE são separados por uma linha em branco.
-        let separatorIndex = buffer.indexOf("\n\n");
-        while (separatorIndex !== -1) {
-          const rawEvent = buffer.slice(0, separatorIndex);
-          buffer = buffer.slice(separatorIndex + 2);
-
-          const chunk = parseSseEvent(rawEvent);
-          if (chunk) {
-            yield chunk;
-            if (chunk.type === "done") return;
-          }
-          separatorIndex = buffer.indexOf("\n\n");
-        }
-      }
-
-      // Chegou aqui sem `done`: o servidor/proxy fechou no meio. Uma resposta
-      // cortada não pode ser settlada como concluída com sucesso.
-      if (!signal.aborted) {
-        yield {
-          type: "error",
-          message: "A conexão com o AgentCore caiu antes de a resposta terminar.",
-        };
-      }
+      response = await fetch(`${this.baseUrl}/chat/${threadId}/stream`, {
+        headers,
+        signal,
+      });
     } catch (err) {
       if (signal.aborted) return;
-      yield { type: "error", message: describeError(err) };
-    } finally {
-      // Consumidor pode fechar o generator antes do fim (troca de conversa,
-      // run substituído) — sem cancel a conexão SSE fica pendurada no Fastify.
-      try {
-        await reader.cancel();
-      } catch {
-        /* ignore */
-      }
-      reader.releaseLock();
+      yield { type: "error", message: describeError(err), retriable: true };
+      return;
     }
+
+    if (response.status === 404) {
+      yield {
+        type: "error",
+        message: "Nenhuma geração em andamento para reanexar.",
+        retriable: true,
+      };
+      return;
+    }
+    if (!response.ok || !response.body) {
+      yield { type: "error", message: await describeHttpError(response) };
+      return;
+    }
+
+    yield* lerStreamSse(response.body, signal);
+  }
+
+  /** Cancela a geração no servidor (`POST /api/chat/:id/cancel`). 404 (nada
+   * rodando) é sucesso silencioso — o objetivo já está atingido. */
+  async cancelRun(threadId: string): Promise<void> {
+    const token = await getAccessToken();
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const response = await fetch(`${this.baseUrl}/chat/${threadId}/cancel`, {
+      method: "POST",
+      headers,
+    });
+    if (!response.ok && response.status !== 404) {
+      throw new Error(await describeHttpError(response));
+    }
+  }
+}
+
+/**
+ * Lê um corpo SSE já aberto e emite os chunks até o `done`. Conexão caindo no
+ * meio (fim sem `done`, erro de leitura) vira erro `retriable`: o run pode
+ * continuar vivo no servidor e o consumidor tenta reanexar.
+ */
+async function* lerStreamSse(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal,
+): AsyncIterable<ChatStreamChunk> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Eventos SSE são separados por uma linha em branco.
+      let separatorIndex = buffer.indexOf("\n\n");
+      while (separatorIndex !== -1) {
+        const rawEvent = buffer.slice(0, separatorIndex);
+        buffer = buffer.slice(separatorIndex + 2);
+
+        const chunk = parseSseEvent(rawEvent);
+        if (chunk) {
+          yield chunk;
+          if (chunk.type === "done") return;
+        }
+        separatorIndex = buffer.indexOf("\n\n");
+      }
+    }
+
+    // Chegou aqui sem `done`: o servidor/proxy fechou no meio. Uma resposta
+    // cortada não pode ser settlada como concluída com sucesso.
+    if (!signal.aborted) {
+      yield {
+        type: "error",
+        message: "A conexão com o AgentCore caiu antes de a resposta terminar.",
+        retriable: true,
+      };
+    }
+  } catch (err) {
+    if (signal.aborted) return;
+    yield { type: "error", message: describeError(err), retriable: true };
+  } finally {
+    // Consumidor pode fechar o generator antes do fim (troca de conversa,
+    // run substituído) — sem cancel a conexão SSE fica pendurada no Fastify.
+    try {
+      await reader.cancel();
+    } catch {
+      /* ignore */
+    }
+    reader.releaseLock();
   }
 }
 

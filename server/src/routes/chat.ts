@@ -53,6 +53,10 @@ import {
 } from "../services/context-budget.js"
 import { agendarPosRun } from "../services/jobs.js"
 import {
+  chatRunRegistry,
+  type RunAssinante,
+} from "../services/chat-run-registry.js"
+import {
   buscarTrechosRelevantes,
   formatarBlocoRag,
 } from "../services/message-embeddings.js"
@@ -695,23 +699,40 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
 
     initSSE(reply)
 
-    // Abort quando o cliente fecha a conexão (botão Parar / tab). Troca de
-    // conversa no SPA NÃO fecha o fetch — o ChatRunsStore mantém o reader.
+    // O run é registrado ANTES de começar e vive DESLIGADO desta conexão:
+    // cliente desconectar (F5, fechar aba, rede caiu) só desanexa o assinante
+    // — a geração segue neste processo, os eventos ficam no registro
+    // (reanexável via GET /api/chat/:threadId/stream) e a resposta é
+    // persistida no banco ao final. Abortam o run apenas o cancelamento
+    // explícito (POST /api/chat/:threadId/cancel), a substituição por um run
+    // novo do mesmo chat e o timeout abaixo.
     const controller = new AbortController()
+    const run = chatRunRegistry.iniciar({
+      chatId: body.threadId,
+      userId,
+      controller,
+    })
+
     let clientOpen = true
     let timedOut = false
+    const assinante: RunAssinante = {
+      emitir: (evt) => {
+        if (!clientOpen) return
+        try {
+          writeSSE(reply, evt)
+        } catch {
+          clientOpen = false
+        }
+      },
+    }
+    chatRunRegistry.assinar(run, assinante)
     request.raw.on("close", () => {
       clientOpen = false
-      controller.abort()
+      chatRunRegistry.desassinar(run, assinante)
     })
 
     const emit = (evt: Parameters<typeof writeSSE>[1]): void => {
-      if (!clientOpen) return
-      try {
-        writeSSE(reply, evt)
-      } catch {
-        clientOpen = false
-      }
+      chatRunRegistry.publicar(run, evt)
     }
 
     // Keepalive: evita proxy/idle drop e dá sinal de vida ao front.
@@ -1125,6 +1146,12 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     } finally {
       clearInterval(heartbeat)
       clearTimeout(runTimer)
+      // Cancelamento (Parar) encerra sem evento no stream — garante o
+      // terminal no registro para reanexações não ficarem penduradas.
+      chatRunRegistry.encerrar(
+        run,
+        endReason === "aborted" && !timedOut ? "cancelled" : "done",
+      )
       if (clientOpen) {
         endSSE(reply)
       } else {
@@ -1141,5 +1168,142 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     await persistirResposta()
     await gravarAuditoria()
     agendarResumo()
+  })
+
+  const runParamsSchema = z.object({ threadId: z.string().uuid() })
+
+  /**
+   * Estado do run desta conversa neste processo: em andamento ou recém-
+   * encerrado (janela de reanexação). O front usa ao abrir a conversa para
+   * decidir se reanexa (GET .../stream) — run desconhecido significa que não
+   * há nada rodando e o histórico do banco já é a verdade.
+   */
+  app.get("/api/chat/:threadId/run", async (request, reply) => {
+    const parsed = runParamsSchema.safeParse(request.params)
+    if (!parsed.success) {
+      reply.code(400).send({ error: "invalid_request" })
+      return
+    }
+    const { userId } = await resolveUser(request)
+    const run = chatRunRegistry.obter(parsed.data.threadId, userId)
+    if (!run) {
+      return { active: false, status: null }
+    }
+    return { active: run.status === "running", status: run.status }
+  })
+
+  /**
+   * Reanexa num run em andamento (ou recém-encerrado): replay de tudo que já
+   * foi produzido (progresso + texto acumulado) e eventos ao vivo até o
+   * terminal — mesmo contrato SSE do POST /api/chat. É o que permite F5,
+   * fechar a aba ou trocar de rede sem perder a resposta.
+   */
+  app.get("/api/chat/:threadId/stream", async (request, reply) => {
+    const parsed = runParamsSchema.safeParse(request.params)
+    if (!parsed.success) {
+      reply.code(400).send({ error: "invalid_request" })
+      return
+    }
+    const { userId } = await resolveUser(request)
+
+    let clientOpen = true
+    let heartbeat: NodeJS.Timeout | undefined
+    let encerrado = false
+    // O handler só resolve quando o stream termina (terminal do run ou
+    // desconexão) — mesmo ciclo de vida do POST /api/chat.
+    let resolverFim: (() => void) | null = null
+    const fim = new Promise<void>((resolve) => {
+      resolverFim = resolve
+    })
+    const finalizar = (): void => {
+      if (encerrado) return
+      encerrado = true
+      if (heartbeat) clearInterval(heartbeat)
+      if (clientOpen) {
+        try {
+          endSSE(reply)
+        } catch {
+          /* já fechado */
+        }
+      }
+      resolverFim?.()
+    }
+    const assinante: RunAssinante = {
+      emitir: (evt) => {
+        if (!clientOpen) return
+        try {
+          writeSSE(reply, evt)
+          if (evt.event === "done" || evt.event === "error") {
+            finalizar()
+          }
+        } catch {
+          clientOpen = false
+        }
+      },
+    }
+
+    const anexo = chatRunRegistry.anexar(parsed.data.threadId, userId, assinante)
+    if (!anexo) {
+      reply.code(404).send({
+        error: "no_active_run",
+        message: "Nenhuma geração em andamento nesta conversa.",
+      })
+      return
+    }
+
+    initSSE(reply)
+    heartbeat = setInterval(() => {
+      if (!clientOpen || encerrado) return
+      try {
+        writeSSEHeartbeat(reply)
+      } catch {
+        clientOpen = false
+      }
+    }, 15_000)
+    request.raw.on("close", () => {
+      clientOpen = false
+      chatRunRegistry.desassinar(anexo.run, assinante)
+      finalizar()
+    })
+
+    // Replay síncrono antes de qualquer evento ao vivo (o assinante já está
+    // registrado, mas broadcasts só acontecem quando o loop cede o event
+    // loop — nada intercala aqui).
+    for (const evt of anexo.replay) {
+      assinante.emitir(evt)
+    }
+
+    await fim
+  })
+
+  /** Teto de espera do cancel pelo assentamento do run — loop preso não pode
+   * pendurar o POST (o abort já foi disparado de qualquer forma). */
+  const CANCEL_AGUARDA_FIM_MS = 10_000
+
+  /**
+   * Cancela a geração em andamento (botão Parar / retry). Como a desconexão
+   * do SSE não aborta mais o run, este endpoint é o ÚNICO cancelamento
+   * explícito. O 204 só volta DEPOIS de o run assentar (terminal publicado,
+   * resposta parcial já persistida) — o "Tentar novamente" depende disso
+   * para truncar o histórico sem corrida com o run antigo.
+   */
+  app.post("/api/chat/:threadId/cancel", async (request, reply) => {
+    const parsed = runParamsSchema.safeParse(request.params)
+    if (!parsed.success) {
+      reply.code(400).send({ error: "invalid_request" })
+      return
+    }
+    const { userId } = await resolveUser(request)
+    const run = chatRunRegistry.obter(parsed.data.threadId, userId)
+    if (!run || run.status !== "running") {
+      reply.code(404).send({
+        error: "no_active_run",
+        message: "Nenhuma geração em andamento nesta conversa.",
+      })
+      return
+    }
+    chatRunRegistry.cancelar(parsed.data.threadId, userId)
+    await chatRunRegistry.aguardarFim(run, CANCEL_AGUARDA_FIM_MS)
+    reply.code(204).send()
   })
 }

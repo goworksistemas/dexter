@@ -21,8 +21,14 @@ import {
   useChatStepsHistory,
   useIsChatRunning,
 } from "@/lib/chats"
-import { runSnapshotToThreadMessages } from "@/lib/chats/chat-runs-store"
-import { truncateChatFromMessage } from "@/lib/chats/api"
+import {
+  chatRunsStore,
+  runSnapshotToThreadMessages,
+} from "@/lib/chats/chat-runs-store"
+import {
+  truncateChatAfterLastUser,
+  truncateChatFromMessage,
+} from "@/lib/chats/api"
 import { useDexterRuntime } from "@/lib/runtime/use-dexter-runtime"
 import {
   usePendingAttachments,
@@ -315,11 +321,8 @@ export function ChatThread() {
   )
 
   const retryLastExchange = useCallback(async () => {
-    // Run travado no store: cancela e segue com o retry (recuperação).
-    if (storeRunning) {
-      cancelRun(activeChatId)
-    }
-
+    // Snapshot ANTES de qualquer await — o settle do cancelamento dispara
+    // sync de histórico que pode mexer na thread no meio do caminho.
     const current = runtime.thread.getState().messages
     let lastUserIndex = -1
     for (let i = current.length - 1; i >= 0; i--) {
@@ -332,38 +335,29 @@ export function ChatThread() {
       toast.error("Nada para tentar novamente.")
       return
     }
-
     // Mantém até a última msg do usuário (inclusive); apaga respostas depois.
     const keepCount = lastUserIndex + 1
-    const deleteFrom = current[lastUserIndex + 1]
-    if (deleteFrom?.id && !UUID_RE.test(deleteFrom.id)) {
-      toast.error(AVISO_DESSINCRONIZADO)
-      reloadHistory()
-      return
-    }
+    const userText = textoDaMensagem(current[lastUserIndex]!)
+
+    // Estado real primeiro: cancela e AGUARDA assentar qualquer run — o
+    // local travado e também o fantasma que só o servidor conhece. Sem a
+    // espera, o run antigo poderia persistir a resposta parcial DEPOIS do
+    // truncate abaixo e ressuscitar como lixo no histórico.
+    await chatRunsStore.cancelarEAguardarServidor(activeChatId)
+
     try {
-      if (deleteFrom?.id) {
-        await truncateChatFromMessage(activeChatId, deleteFrom.id)
-      }
+      // Apaga a resposta falhada QUANDO ela chegou a ser persistida — por
+      // TEXTO do turno, não por id: a bolha de erro costuma ter id local (o
+      // servidor não grava resposta vazia de run falhado) e truncar por esse
+      // id sempre dava 404, deixando o retry morto até um reload da página.
+      await truncateChatAfterLastUser(activeChatId, userText)
       iniciarRegeneracao(current.slice(0, keepCount).map(paraThreadMessageLike))
     } catch (err) {
-      if (ehErroDeIdDessincronizado(err)) {
-        toast.error(AVISO_DESSINCRONIZADO)
-        reloadHistory()
-        return
-      }
       toast.error(
         err instanceof Error ? err.message : "Falha ao tentar novamente.",
       )
     }
-  }, [
-    activeChatId,
-    cancelRun,
-    iniciarRegeneracao,
-    reloadHistory,
-    runtime,
-    storeRunning,
-  ])
+  }, [activeChatId, iniciarRegeneracao, runtime])
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>

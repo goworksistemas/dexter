@@ -448,6 +448,31 @@ export function ChatsProvider({ children }: { children: React.ReactNode }) {
         if (liveNow) {
           chatRunsStore.discardRun(id)
         }
+        // Geração ainda viva no SERVIDOR sem run local (F5, aba nova): o
+        // store reanexa e o snapshot assume a thread — a resposta continua
+        // chegando como se a aba nunca tivesse fechado.
+        void chatRunsStore
+          .resumeRunSeAtivo(
+            id,
+            page.messages.map((m) => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              createdAt: m.created_at,
+            })),
+          )
+          .then((retomou) => {
+            if (!retomou) return
+            if (requestId !== historyRequestRef.current) return
+            const live = chatRunsStore.getRun(id)
+            if (live?.status === "running") {
+              applyHistory(
+                runtimeRef.current,
+                pendingHistoryRef,
+                runSnapshotToThreadMessages(live),
+              )
+            }
+          })
       })
       .catch((err) => {
         if (requestId !== historyRequestRef.current) return

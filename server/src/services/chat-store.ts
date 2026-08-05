@@ -9,6 +9,7 @@ import {
   migrateMessageDataImages,
 } from "../lib/chat-images.js"
 import { supabase } from "../lib/supabase.js"
+import { stripArtifactAppendix } from "../systems/artifacts-context.js"
 import { ForbiddenError } from "./auth.js"
 import { assertProjectOwnedOrThrow } from "./project-store.js"
 
@@ -564,6 +565,84 @@ export async function truncateMessages(
 
   if (touchError) {
     throw new Error(`truncateMessages (touch) falhou: ${touchError.message}`)
+  }
+
+  return true
+}
+
+/**
+ * Retry ("Tentar novamente"): mantém tudo até a ÚLTIMA mensagem do usuário
+ * (inclusive) e apaga o que veio depois — a resposta falhada, quando chegou a
+ * ser persistida. Opera por TEXTO do turno, não por id: a bolha de erro na UI
+ * costuma ter id local (o servidor não grava resposta vazia), então truncar
+ * por id sempre daria 404 nesses casos.
+ *
+ * `userText` protege contra apagar o turno errado: se a última mensagem do
+ * usuário no banco não for o turno sendo repetido (ex.: rate limit barrou o
+ * POST antes do insert), não há nada DESTE turno para apagar — no-op com
+ * sucesso, e o próximo POST /api/chat insere o turno inteiro. Idempotente.
+ */
+export async function truncateAfterLastUserMessage(
+  chatId: string,
+  userId: string,
+  userText: string,
+): Promise<boolean> {
+  const ownership = await assertChatOwnedOrNew(chatId, userId)
+  // Conversa só existe no client — o próximo POST /api/chat cria tudo.
+  if (ownership === "new") return true
+
+  const { data, error } = await supabase
+    .from("agent_messages")
+    .select("id, role, content, created_at")
+    .eq("chat_id", chatId)
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true })
+
+  if (error) {
+    throw new Error(`truncateAfterLastUserMessage falhou: ${error.message}`)
+  }
+
+  const rows = data ?? []
+  let lastUserIdx = -1
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i]!.role === "user") {
+      lastUserIdx = i
+      break
+    }
+  }
+  if (lastUserIdx < 0) return true
+
+  const persistido = stripArtifactAppendix(
+    String(rows[lastUserIdx]!.content ?? ""),
+  ).trim()
+  const esperado = stripArtifactAppendix(userText).trim()
+  if (persistido !== esperado) return true
+
+  const idsToDelete = rows.slice(lastUserIdx + 1).map((m) => m.id as string)
+  if (idsToDelete.length > 0) {
+    const { error: delError } = await supabase
+      .from("agent_messages")
+      .delete()
+      .eq("chat_id", chatId)
+      .in("id", idsToDelete)
+
+    if (delError) {
+      throw new Error(
+        `truncateAfterLastUserMessage (delete) falhou: ${delError.message}`,
+      )
+    }
+  }
+
+  const { error: touchError } = await supabase
+    .from("agent_chats")
+    .update({ updated_at: new Date().toISOString() })
+    .eq("id", chatId)
+    .eq("user_id", userId)
+
+  if (touchError) {
+    throw new Error(
+      `truncateAfterLastUserMessage (touch) falhou: ${touchError.message}`,
+    )
   }
 
   return true

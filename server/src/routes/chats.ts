@@ -17,6 +17,7 @@ import {
   setChatModel,
   setChatProject,
   TAIL_MAX_LIMIT,
+  truncateAfterLastUserMessage,
   truncateFromMessageId,
   truncateMessages,
 } from "../services/chat-store.js"
@@ -165,13 +166,27 @@ export default async function chatsRoutes(app: FastifyInstance): Promise<void> {
     .object({
       keepCount: z.number().int().min(0).optional(),
       deleteFromMessageId: z.string().uuid().optional(),
+      /**
+       * Retry: apaga tudo DEPOIS da última mensagem do usuário, desde que o
+       * texto dela seja este (proteção contra apagar o turno errado quando o
+       * turno atual nunca foi persistido). Não depende de id — a bolha de
+       * erro na UI costuma ter id local, sem linha no banco.
+       */
+      afterLastUserText: z.string().min(1).optional(),
     })
     .refine(
-      (b) => b.keepCount !== undefined || b.deleteFromMessageId !== undefined,
-      { message: "Informe keepCount ou deleteFromMessageId." },
+      (b) =>
+        b.keepCount !== undefined ||
+        b.deleteFromMessageId !== undefined ||
+        b.afterLastUserText !== undefined,
+      {
+        message:
+          "Informe keepCount, deleteFromMessageId ou afterLastUserText.",
+      },
     )
 
-  /** Truncar histórico (edit/regenerate) — por contagem ou a partir de um id. */
+  /** Truncar histórico (edit/regenerate/retry) — por contagem, a partir de
+   * um id, ou depois da última mensagem do usuário (retry). */
   app.post<{ Params: { id: string } }>(
     "/api/chats/:id/truncate",
     async (request, reply) => {
@@ -188,6 +203,12 @@ export default async function chatsRoutes(app: FastifyInstance): Promise<void> {
           request.params.id,
           userId,
           parsed.data.deleteFromMessageId,
+        )
+      } else if (parsed.data.afterLastUserText !== undefined) {
+        ok = await truncateAfterLastUserMessage(
+          request.params.id,
+          userId,
+          parsed.data.afterLastUserText,
         )
       } else {
         ok = await truncateMessages(

@@ -7,6 +7,7 @@
  */
 import type {
   ChatRequest,
+  ChatRunStatusWire,
   ChatStreamChunk,
   ChatTransport,
 } from "@/lib/agentcore/contract"
@@ -49,6 +50,22 @@ export class MockTransport implements ChatTransport {
     }
 
     yield { type: "done" }
+  }
+
+  /** O mock roda tudo no client — nunca há run vivo "no servidor". */
+  async fetchRunStatus(_threadId: string): Promise<ChatRunStatusWire> {
+    return { active: false, status: null }
+  }
+
+  async *resumeStream(
+    _threadId: string,
+    _signal: AbortSignal,
+  ): AsyncIterable<ChatStreamChunk> {
+    yield { type: "done" }
+  }
+
+  async cancelRun(_threadId: string): Promise<void> {
+    // Nada a cancelar fora do processo — o abort do signal já resolve.
   }
 }
 

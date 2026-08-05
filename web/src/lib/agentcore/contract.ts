@@ -119,15 +119,25 @@ export interface AgentStepWire {
   created_at?: string;
 }
 
-/** Eventos emitidos pelo stream (mapeiam 1:1 aos eventos SSE do AgentCore). */
+/** Eventos emitidos pelo stream (mapeiam 1:1 aos eventos SSE do AgentCore).
+ * `retriable` só existe em erros SINTÉTICOS do transporte (conexão caiu no
+ * meio do stream): o run pode continuar vivo no servidor — vale reanexar. */
 export type ChatStreamChunk =
   | { type: "text-delta"; textDelta: string }
   | { type: "tool-call"; toolCallId: string; toolName: string; args: unknown }
   | { type: "tool-result"; toolCallId: string; result: unknown }
   | { type: "progress"; event: AgentProgressEvent }
   | { type: "heartbeat" }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; retriable?: boolean }
   | { type: "done" };
+
+/** Estado do run de uma conversa no servidor (`GET /api/chat/:id/run`). */
+export interface ChatRunStatusWire {
+  /** Há geração em andamento no servidor para esta conversa. */
+  active: boolean;
+  /** `null` = o servidor não conhece run recente desta conversa. */
+  status: "running" | "done" | "error" | "cancelled" | null;
+}
 
 export interface ChatTransport {
   /**
@@ -135,4 +145,17 @@ export interface ChatTransport {
    * Deve respeitar o AbortSignal para cancelamento (stop).
    */
   stream(req: ChatRequest, signal: AbortSignal): AsyncIterable<ChatStreamChunk>;
+  /** Estado do run desta conversa no servidor (ativo ou recém-encerrado). */
+  fetchRunStatus(threadId: string): Promise<ChatRunStatusWire>;
+  /**
+   * Reanexa num run em andamento no servidor: replay do que já foi gerado
+   * (progresso + texto acumulado) e eventos ao vivo até o terminal — mesmo
+   * contrato de chunks do `stream`.
+   */
+  resumeStream(
+    threadId: string,
+    signal: AbortSignal,
+  ): AsyncIterable<ChatStreamChunk>;
+  /** Cancela a geração em andamento no servidor (botão Parar). */
+  cancelRun(threadId: string): Promise<void>;
 }
