@@ -4,10 +4,18 @@ dist/
 dist-ssr/
 *.tsbuildinfo
 
+# Artefatos locais de auditoria / scripts one-off
+_tmp_*
+_dossier*
+_audit/
+.temp/
+
 # Secrets / env local
 .env
 .env.*
 !.env.example
+# Config local do SearXNG dev — settings.yml contém secret_key
+.searxng-dev/
 
 # Logs e cache
 logs/

@@ -1,13 +1,12 @@
 # 🧠 AgentCore — Especificação Técnica
 
-> Backend estruturado para os super agentes de IA da GoWork (Gabi + Dexter).
+> Backend estruturado para o super agente de IA da GoWork (**Dexter**).
 > Runtime de alta frequência para chat síncrono, tirando o hot path do n8n.
 
-- **Status:** 🟡 Em especificação
+- **Status:** 🟢 Em produção (v1.4.0)
 - **Owner:** Luis Cuba (Sistemas)
-- **Revisão SQL/segurança:** Galdino
 - **Tarefa Notion:** [IA | AgentCore](https://app.notion.com/p/3b1c3598383a8160b440ffb52afe557d)
-- **Última atualização:** 2026-08-03
+- **Última atualização:** 2026-08-05
 
 ---
 
@@ -27,12 +26,11 @@ O n8n hoje roda os fluxos de chat dos agentes (`dexter-company-chat`). Isso não
 
 ---
 
-## 2. Agentes atendidos
+## 2. Agente atendido
 
 | Agente | Canal | Auth | Público |
 |--------|-------|------|---------|
-| **Gabi** | WhatsApp / Hyperflow | Token de canal | Clientes (externo) |
-| **Dexter** | Frontends (NetworkGo, PipeGo, GoAcademy, etc.) | JWT Supabase Auth | Interno |
+| **Dexter** | Frontends (NetworkGo, PipeGo, GoAcademy, Dexter web, etc.) | JWT Supabase Auth | Interno |
 
 ---
 
@@ -40,8 +38,7 @@ O n8n hoje roda os fluxos de chat dos agentes (`dexter-company-chat`). Isso não
 
 ```mermaid
 flowchart LR
-  FE["Frontends (NetworkGo, PipeGo, GoAcademy, etc.)"] --> GW["AgentCore API Gateway\n(auth JWT + rate limit)"]
-  WA["WhatsApp / Hyperflow (Gabi)"] --> GW
+  FE["Frontends (NetworkGo, PipeGo, GoAcademy, Dexter web, etc.)"] --> GW["AgentCore API Gateway\n(auth JWT + rate limit)"]
   GW --> RT["Agent Runtime\n(sessões, tools, streaming SSE)"]
   RT --> LLM["LLM Router\n(Anthropic / fallback / cache semântico)"]
   RT --> Q["Fila (Redis + BullMQ)\njobs assíncronos"]
@@ -54,7 +51,7 @@ flowchart LR
 
 | # | Componente | Stack (proposta) | Responsabilidade |
 |---|-----------|------------------|------------------|
-| 1 | **API Gateway** | Node.js (Fastify) atrás de proxy | Auth (JWT Dexter / token de canal Gabi), rate limit (sliding window Redis), CORS restrito |
+| 1 | **API Gateway** | Node.js (Fastify) atrás de proxy | Auth (JWT Supabase do Dexter), rate limit (sliding window Redis), CORS restrito |
 | 2 | **Agent Runtime** | Fastify + SSE | Sessão, montagem de contexto (histórico + RAG + tools), chamada ao LLM com streaming. **Stateless** |
 | 3 | **LLM Router** | LiteLLM ou próprio | Roteamento por custo/tarefa, retry+backoff, fallback entre provedores, cache semântico |
 | 4 | **Fila assíncrona** | Redis + BullMQ | Jobs sem resposta imediata: OTP, sumarização, embeddings, notificações. Retry + DLQ |
@@ -62,7 +59,7 @@ flowchart LR
 | 6 | **Observabilidade** | logs estruturados + GoDash/NOC | `trace_id`, latência p50/p95, custo por conversa, taxa de fallback |
 
 > ⚠️ **Decisão bloqueante (item de escopo 1):** Fastify em container **vs** edge functions.
-> Edge functions do Supabase não sustentam bem SSE de longa duração nem sessões persistentes (limite de execução + cold start). Recomendação técnica: **Fastify em container para o hot path (gateway + runtime SSE)**; edge functions apenas para jobs curtos, se houver. Validar com Galdino.
+> Edge functions do Supabase não sustentam bem SSE de longa duração nem sessões persistentes (limite de execução + cold start). Recomendação técnica: **Fastify em container para o hot path (gateway + runtime SSE)**; edge functions apenas para jobs curtos, se houver. Validar em revisão de SQL/segurança.
 
 ---
 
@@ -83,14 +80,14 @@ flowchart LR
 - ✅ Toda tool call registrada em `agent_tool_calls` com input/output, usuário e timestamp (**auditoria LGPD**).
 - ✅ Acesso ao banco pelos agentes **exclusivamente via RPCs read-only** com `SECURITY DEFINER` restrito — **nunca SQL livre gerado por LLM**.
 - ✅ Guardrails de prompt: system prompt **versionado**, filtros de PII em logs, injection detection básica em inputs.
-- ✅ **Revisão SQL obrigatória do Galdino** em todas as RPCs e migrations.
+- ✅ **Revisão SQL/segurança obrigatória** em todas as RPCs e migrations.
 - ⚠️ **Cache semântico:** threshold de similaridade alto + **escopo por tenant/usuário** para evitar vazamento de dado entre clientes.
 
 ---
 
 ## 6. Modelo de dados (rascunho)
 
-> A detalhar e revisar com Galdino antes de qualquer migration.
+> A detalhar e revisar (SQL/segurança) antes de qualquer migration.
 
 ```sql
 -- agent_chats: uma sessão de conversa
@@ -98,24 +95,25 @@ flowchart LR
 -- agent_tool_calls: auditoria de tool calls (input, output, usuario, ts, trace_id)
 -- agent_feedback: feedback do usuário sobre respostas
 -- RLS por usuário/tenant em todas as tabelas
--- pgvector: base de conhecimento (aproveitar vetorização existente da Gabi)
+-- pgvector: base de conhecimento (embeddings / RAG)
 ```
 
-*(Schema completo — TODO)*
+*(Schema implementado — 32 migrations em `supabase/migrations/`; detalhe no repo.)*
 
 ---
 
 ## 7. Escopo (checklist)
 
-- [ ] Definir stack final (Fastify + BullMQ vs edge functions; validar com Galdino)
-- [ ] Provisionar Redis e containers no DigitalOcean/Portainer
-- [ ] Implementar gateway (auth, rate limit, CORS)
-- [ ] Implementar runtime com streaming SSE e gestão de sessão
-- [ ] Implementar LLM Router (roteamento, fallback, cache semântico)
-- [ ] Criar schema Supabase (`agent_chats`, `agent_messages`, `agent_tool_calls`, `agent_feedback`) com RLS — revisão Galdino
-- [ ] Migrar fluxos de chat existentes do n8n (`dexter-company-chat`) para o runtime; manter n8n só nas integrações
-- [ ] Observabilidade: logs, métricas e painel no NOC/GoDash
+- [x] Definir stack final — **Fastify em container** para hot path (SSE); edge functions descartadas para chat
+- [x] Provisionar Redis e containers no DigitalOcean/Portainer — **Redis sobe no compose; BullMQ ainda não integrado**
+- [x] Implementar gateway (auth JWT Supabase, rate limit global, CORS)
+- [x] Implementar runtime com streaming SSE e gestão de sessão (persistência em `agent_chats` / `agent_messages`)
+- [x] Implementar LLM Router multi-provider (Anthropic, OpenAI, Gemini, DeepSeek, xAI, Ollama) — **cache semântico pendente**
+- [x] Criar schema Supabase com RLS — **32 migrations** (`agent_chats`, `agent_messages`, `agent_tool_calls`, projetos, artefatos, workflows, KB, admin, share, etc.)
+- [ ] Migrar fluxos de chat existentes do n8n (`dexter-company-chat`) para o runtime — **Dexter web já no AgentCore; embeds NetworkGo/PipeGo/GoAcademy ainda parcialmente no n8n**
+- [ ] Observabilidade: logs, métricas e painel no NOC/GoDash — **hoje só painel admin interno**
 - [ ] Teste de carga (50 sessões simultâneas) e documentação técnica no padrão S&D
+- [ ] Fila assíncrona BullMQ — **workflows usam timer in-process (`workflow-runner.ts`); Redis ocioso**
 
 ---
 
@@ -124,9 +122,11 @@ flowchart LR
 | Fase | Entrega | O que destrava |
 |------|---------|----------------|
 | **1 — MVP hot path** | Gateway (auth+rate limit) + Runtime SSE + 1 modelo, sem router/cache | Dexter respondendo fora do n8n |
-| **2 — Persistência + auditoria** | Schema Supabase + RLS + `agent_tool_calls` (revisão Galdino) | Compliance LGPD |
+| **2 — Persistência + auditoria** | Schema Supabase + RLS + `agent_tool_calls` (revisão de SQL/segurança) | Compliance LGPD |
 | **3 — Router + fila** | LLM Router (fallback+cache) + BullMQ + DLQ | Economia de custo e jobs async |
 | **4 — Escala + obs.** | 2+ réplicas + LB + painel NOC + teste de carga 50 sessões | Critério de aceite final |
+
+**Estado atual (2026-08-05):** fases **1–3 entregues** (gateway, runtime SSE, schema, router multi-provider, 9 sistemas integrados via RPC, conectores OAuth, workflows in-process, admin). **Fase 4 parcial** — 1 réplica em prod, sem painel NOC nem teste de carga; BullMQ pendente.
 
 ---
 
@@ -143,7 +143,7 @@ flowchart LR
 
 ## 10. Critérios de aceite
 
-- [ ] Chat da Gabi e do Dexter respondendo via AgentCore com streaming, **sem passar pelo n8n no caminho síncrono**.
+- [ ] Chat do Dexter respondendo via AgentCore com streaming, **sem passar pelo n8n no caminho síncrono**.
 - [ ] **p95 < 3s até primeiro token** sob 50 sessões simultâneas.
 - [ ] **Zero secrets em frontend**; **100% das tool calls auditadas**.
 - [ ] n8n **sem workflows de chat de alta frequência** ativos.
@@ -152,4 +152,5 @@ flowchart LR
 
 ## Changelog
 
+- **2026-08-05** — Status atualizado para produção v1.4.0; checklist e faseamento alinhados ao código (32 migrations, 12 grupos de rotas, router multi-provider; pendências: BullMQ, cache semântico, load test, NOC, migração n8n parcial).
 - **2026-08-03** — Especificação inicial criada a partir da tarefa do Notion + análise técnica.
