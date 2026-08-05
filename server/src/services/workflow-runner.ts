@@ -5,6 +5,10 @@
  * executa cada um com as permissões do dono, gravando o resultado como uma
  * conversa nova (agent_chats) — é o "resultado" que o usuário abre depois.
  *
+ * Com Redis (item 2.1) o tick só DECIDE o que está vencido: a execução vira job
+ * BullMQ com retry (o claim no banco continua sendo a fonte de verdade contra
+ * multi-réplica). Sem Redis, executa inline no próprio tick — igual a antes.
+ *
  * Sem backfill: se o horário passou (server desligado), o próximo disparo é
  * recalculado a partir de agora — não roda o atrasado várias vezes.
  * Nunca roda o mesmo workflow em paralelo (claim no banco + guard em memória +
@@ -12,7 +16,10 @@
  */
 import { randomUUID } from "node:crypto"
 
+import type { FastifyBaseLogger } from "fastify"
+
 import { resolveConnectorRuntime } from "../connectors/status.js"
+import { enqueue } from "../lib/queue.js"
 import type { ConnectorRuntime } from "../connectors/types.js"
 import { isErroSanitizado } from "../lib/erro-modelo.js"
 import { isOpenAiCompatibleProvider } from "../lib/openai-compatible.js"
@@ -22,7 +29,11 @@ import type { Provider } from "../llm/models.js"
 import { getEffectiveKey, isKeyProvider } from "./llm-keys.js"
 import { resolveModelForUser } from "./model-access.js"
 import { streamChat } from "../llm/router.js"
-import { DEXTER_SYSTEM_PROMPT } from "../llm/system-prompt.js"
+import {
+  DEXTER_SYSTEM_PROMPT,
+  flattenSystemPrompt,
+  type SystemPromptParts,
+} from "../llm/system-prompt.js"
 import { runAgentLoop, type ToolCallRecord } from "../systems/agent-loop.js"
 import { accessSummary, resolveAccess, type SystemAccess } from "../systems/access.js"
 import { auditToolCalls } from "../systems/audit.js"
@@ -34,6 +45,7 @@ import {
   finishRun,
   claimDueWorkflows,
   findRunningRun,
+  getWorkflow,
   markWorkflowRan,
   type WorkflowJob,
   type WorkflowRunRecord,
@@ -109,19 +121,22 @@ function tituloDaExecucao(workflow: WorkflowJob, at: Date): string {
   return `⚡ ${workflow.name} — ${formatLocalDayMonth(at, workflow.timezone)}`
 }
 
+/** Base do Dexter fica no bloco estático (cacheável); acesso do dono e dados
+ * do workflow mudam por execução, então vão no dinâmico. */
 function systemPromptDoWorkflow(
   workflow: WorkflowJob,
   access: SystemAccess[],
-): string {
-  return (
-    DEXTER_SYSTEM_PROMPT +
-    "\n\n## Acesso deste usuário aos sistemas GoWork\n" +
-    accessSummary(access) +
-    '\n\n## Execução agendada de workflow\n' +
-    `Esta é uma execução automática do workflow "${workflow.name}". ` +
-    "Execute as instruções e produza a resposta final completa — não há usuário " +
-    "para responder perguntas; se faltar informação, explique o que assumiu."
-  )
+): SystemPromptParts {
+  return {
+    staticBlock: DEXTER_SYSTEM_PROMPT,
+    dynamicBlock:
+      "## Acesso deste usuário aos sistemas GoWork\n" +
+      accessSummary(access) +
+      "\n\n## Execução agendada de workflow\n" +
+      `Esta é uma execução automática do workflow "${workflow.name}". ` +
+      "Execute as instruções e produza a resposta final completa — não há usuário " +
+      "para responder perguntas; se faltar informação, explique o que assumiu.",
+  }
 }
 
 interface ResultadoLoop {
@@ -140,7 +155,7 @@ async function rodarLoop(params: {
   connectors: ConnectorRuntime
   provider: Provider
   model: string
-  systemPrompt: string
+  systemPrompt: SystemPromptParts
   signal: AbortSignal
   apiKey?: string
 }): Promise<ResultadoLoop> {
@@ -200,7 +215,7 @@ async function rodarLoop(params: {
   const handle = streamChat({
     provider: "ollama",
     model: params.model,
-    systemPrompt: params.systemPrompt,
+    systemPrompt: flattenSystemPrompt(params.systemPrompt),
     messages: [{ role: "user", content: params.workflow.prompt }],
     signal: params.signal,
   })
@@ -411,20 +426,80 @@ export async function startManualRun(
   return run
 }
 
+/** Payload do job `workflow-run` (só ids — a linha é relida no worker). */
+export interface WorkflowRunJobData {
+  workflowId: string
+  userId: string
+  trigger: WorkflowRunTrigger
+  /** ISO do claim que originou o job — compõe o jobId (dedupe do mesmo claim). */
+  claimedAt: string
+}
+
+/**
+ * Consumo do job: relê o workflow (a linha pode ter sido editada/desativada
+ * entre o claim e o processamento) e executa. Lançar aqui é o que faz o BullMQ
+ * tentar de novo — por isso só o que é infraestrutura (workflow sumido, erro de
+ * leitura) sobe; falha de modelo já é tratada dentro de `runWorkflow` e vira
+ * `status = 'error'` na run.
+ */
+export async function executarJobDeWorkflow(
+  data: WorkflowRunJobData,
+  jobLog: FastifyBaseLogger,
+): Promise<void> {
+  const workflow = await getWorkflow(data.workflowId, data.userId)
+  if (!workflow) {
+    jobLog.warn(
+      { workflowId: data.workflowId },
+      "workflow do job não existe mais — nada a executar",
+    )
+    return
+  }
+  await runWorkflow(workflow, data.trigger)
+}
+
+/**
+ * Manda a execução para a fila (com retry) ou roda inline quando não há Redis.
+ * Nunca lança: o tick não pode morrer por causa de um workflow.
+ */
+async function despacharExecucao(
+  workflow: WorkflowJob,
+  trigger: WorkflowRunTrigger,
+  claimedAt: string,
+): Promise<void> {
+  const data: WorkflowRunJobData = {
+    workflowId: workflow.id,
+    userId: workflow.user_id,
+    trigger,
+    claimedAt,
+  }
+  try {
+    const enfileirou = await enqueue("workflow-run", data, {
+      jobId: `workflow:${workflow.id}:${claimedAt}`,
+      attempts: 2,
+      backoff: { type: "exponential", delay: 30_000 },
+    })
+    if (enfileirou) {
+      log(`workflow "${workflow.name}" enfileirado (claim ${claimedAt})`)
+      return
+    }
+    await runWorkflow(workflow, trigger)
+  } catch (err) {
+    // runWorkflow já trata os erros dele; aqui é só rede de segurança.
+    logErro(`execução agendada do workflow ${workflow.id} falhou`, err)
+  }
+}
+
 async function tick(): Promise<void> {
   if (tickEmAndamento) return
   tickEmAndamento = true
   try {
-    const vencidos = await claimDueWorkflows(new Date(), MAX_POR_TICK)
+    const agora = new Date()
+    const vencidos = await claimDueWorkflows(agora, MAX_POR_TICK)
     if (vencidos.length === 0) return
     log(`${vencidos.length} workflow(s) vencido(s) neste tick`)
+    const claimedAt = agora.toISOString()
     for (const workflow of vencidos) {
-      try {
-        await runWorkflow(workflow, "schedule")
-      } catch (err) {
-        // runWorkflow já trata os erros; aqui é só rede de segurança.
-        logErro(`execução agendada do workflow ${workflow.id} falhou`, err)
-      }
+      await despacharExecucao(workflow, "schedule", claimedAt)
     }
   } catch (err) {
     logErro("tick do agendador falhou", err)

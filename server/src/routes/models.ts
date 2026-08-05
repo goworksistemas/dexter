@@ -7,6 +7,7 @@ import { keySourceForProvider } from "../llm/model-catalog-meta.js"
 import { probeModels, providerStatus } from "../llm/models.js"
 import { isStaffRole, loadActorProfile } from "../services/admin-store.js"
 import { resolveUser } from "../services/auth.js"
+import { getUsdBrlRate } from "../services/exchange-rate.js"
 import { listUserKeys, type KeyProvider } from "../services/llm-keys.js"
 import {
   defaultModelIdForUser,
@@ -37,6 +38,10 @@ export default async function modelsRoutes(
         }
       }
 
+      // Câmbio junto do catálogo: o front busca modelos no boot, então a UI
+      // consegue mostrar custo em BRL sem nenhuma requisição extra.
+      const cotacaoPromise = getUsdBrlRate()
+
       if (probe) await probeModels(true)
       const [allModels, userKeys] = await Promise.all([
         enabledModelsForUser(user),
@@ -63,6 +68,8 @@ export default async function modelsRoutes(
           models.find((m) => m.id === defaultModelId)?.id ??
           models[0]?.id ??
           "",
+        /** USD→BRL do dia — o web exibe todos os custos em reais. */
+        usdBrlRate: await cotacaoPromise,
         providers: await providerStatus(),
         models: models.map(
           ({

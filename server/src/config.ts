@@ -85,6 +85,27 @@ const schema = z.object({
   RATE_LIMIT_MAX: z.coerce.number().default(60),
   RATE_LIMIT_WINDOW: z.string().default("1 minute"),
 
+  /**
+   * Rate limit do POST /api/chat por USUÁRIO autenticado (o limite global do
+   * @fastify/rate-limit é por IP e, atrás do Traefik, todo mundo divide o
+   * mesmo IP). Sliding window: no máximo MAX requisições dentro da janela.
+   */
+  CHAT_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(20),
+  CHAT_RATE_LIMIT_WINDOW_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60_000),
+
+  /**
+   * Redis da fila BullMQ (jobs de sumarização, embeddings e execução de
+   * workflows) e do rate limit por usuário. OPCIONAL de propósito: sem
+   * REDIS_URL o AgentCore roda inteiro em processo (fila vira execução inline,
+   * rate limit vira Map em memória) — é assim que o dev local funciona.
+   * Em produção o Redis já sobe no compose: redis://redis:6379.
+   */
+  REDIS_URL: z.string().optional(),
+
   /** Room for dossiê (schema + SQLs densos) without cutting mid-investigation. */
   AGENT_MAX_STEPS: z.coerce.number().int().positive().default(28),
   AGENT_MAX_ROUNDS: z.coerce.number().int().positive().default(14),
@@ -109,12 +130,24 @@ const schema = z.object({
   WEB_SEARCH_MAX_USES: z.coerce.number().int().positive().default(5),
   AGENT_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(480_000),
   AGENT_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
-  /** Teto do tool_result no contexto. Notion MCP (schema/markdown) precisa de folga. */
+  /**
+   * Teto do tool_result no contexto. Com 28 steps num turno, 24k por resultado
+   * chegava a ~670k chars reenviados a cada rodada — o truncamento preserva os
+   * agregados, então 8k cobre o caso normal. Notion MCP (schema/markdown denso)
+   * pode precisar de folga: aumente por env quando for o caso.
+   */
   AGENT_TOOL_RESULT_MAX_CHARS: z.coerce
     .number()
     .int()
     .positive()
-    .default(24_000),
+    .default(8_000),
+
+  /**
+   * Janela deslizante do histórico: quantas mensagens anteriores do chat vão
+   * ao modelo junto com a mensagem nova. O que ficar fora é sinalizado no
+   * system prompt (o modelo pede a informação de volta em vez de inventar).
+   */
+  CONTEXT_WINDOW_MESSAGES: z.coerce.number().int().positive().default(12),
 
   /**
    * URL pública do AgentCore (callbacks OAuth).

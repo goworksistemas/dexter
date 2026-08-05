@@ -11,7 +11,7 @@ import type Anthropic from "@anthropic-ai/sdk"
 
 import { config } from "../config.js"
 import { streamChat, type LlmMessage } from "../llm/router.js"
-import { enabledModels } from "../llm/models.js"
+import { enabledModels, responseMaxTokens } from "../llm/models.js"
 import { resolveModelForUser } from "../services/model-access.js"
 import { getEffectiveKey, isKeyProvider, listUserKeys } from "../services/llm-keys.js"
 import { keySourceForProvider } from "../llm/model-catalog-meta.js"
@@ -23,7 +23,12 @@ import {
 import { computeMessageCostUsd } from "../services/model-pricing.js"
 import { isErroSanitizado } from "../lib/erro-modelo.js"
 import { endSSE, initSSE, writeSSE, writeSSEHeartbeat } from "../lib/sse.js"
-import { DEXTER_SYSTEM_PROMPT, MULTI_AGENT_PROMPT_BLOCK } from "../llm/system-prompt.js"
+import {
+  DEXTER_SYSTEM_PROMPT,
+  MULTI_AGENT_PROMPT_BLOCK,
+  flattenSystemPrompt,
+  type SystemPromptParts,
+} from "../llm/system-prompt.js"
 import { resolveUser } from "../services/auth.js"
 import {
   isMultiAgentAuthorized,
@@ -35,6 +40,26 @@ import {
   insertMessage,
   upsertChat,
 } from "../services/chat-store.js"
+import { aplicarJanela } from "../services/context-window.js"
+import { getChatSummary } from "../services/chat-summary.js"
+import {
+  consumirCotaDeChat,
+  mensagemLimiteAtingido,
+} from "../services/chat-rate-limit.js"
+import {
+  ajustarContexto,
+  juntarBlocosDinamicos,
+  type BlocoDinamico,
+} from "../services/context-budget.js"
+import { agendarPosRun } from "../services/jobs.js"
+import {
+  buscarTrechosRelevantes,
+  formatarBlocoRag,
+} from "../services/message-embeddings.js"
+import {
+  criarGuardaOrcamento,
+  invalidarCacheDeGasto,
+} from "../services/run-budget.js"
 import { buildProjectPromptBlock } from "../services/project-store.js"
 import {
   getKbPromptContext,
@@ -48,6 +73,7 @@ import type { ConnectorRuntime } from "../connectors/types.js"
 import { resolveAccess, accessSummary, type SystemAccess } from "../systems/access.js"
 import {
   formatArtifactsSystemBlock,
+  formatArtifactsTitlesBlock,
   stripArtifactAppendix,
   type ArtifactWire,
 } from "../systems/artifacts-context.js"
@@ -108,14 +134,36 @@ const chatContextSchema = z
   })
   .passthrough()
 
-const chatRequestSchema = z.object({
-  threadId: z.string().uuid(),
-  messages: z.array(chatMessageSchema).min(1),
-  context: chatContextSchema.optional(),
-})
+/**
+ * Formato atual: só a mensagem NOVA vai no fio — o histórico o server carrega
+ * de `agent_messages`. `messages[]` é o formato legado (front antigo ainda no
+ * ar durante o deploy): dele só a última mensagem é aproveitada, o resto vem
+ * do banco do mesmo jeito.
+ */
+const chatRequestSchema = z
+  .object({
+    threadId: z.string().uuid(),
+    message: chatMessageSchema.optional(),
+    messages: z.array(chatMessageSchema).min(1).optional(),
+    context: chatContextSchema.optional(),
+  })
+  .refine((body) => body.message != null || (body.messages?.length ?? 0) > 0, {
+    message: "informe `message` (mensagem nova) ou `messages` (formato legado)",
+    path: ["message"],
+  })
 
-/** Bloco da base de conhecimento GoWork: docs `always_load` inteiros + índice
- * do resto (que o modelo lê sob demanda com kb__buscar). Sem docs → null. */
+/**
+ * Aviso no fim do system prompt quando a janela deslizante cortou histórico e
+ * ainda NÃO existe resumo cobrindo o trecho (conversa que acabou de passar da
+ * janela, ou sumarização que falhou).
+ */
+const NOTA_HISTORICO_CORTADO =
+  "Nota: esta conversa tem histórico anterior não incluído; se o usuário " +
+  "referenciar algo antigo que você não vê, diga que precisa que ele repita a informação."
+
+/** Bloco da base de conhecimento GoWork: docs `always_load` (já capados pelo
+ * kb-store) + índice do resto, que o modelo lê sob demanda com kb__buscar.
+ * Sem docs → null. */
 function formatKbBlock(kb: KbPromptContext | null): string | null {
   if (!kb) return null
   if (kb.alwaysDocs.length === 0 && kb.index.length === 0) return null
@@ -135,84 +183,156 @@ function formatKbBlock(kb: KbPromptContext | null): string | null {
   return parts.join("\n\n")
 }
 
-/** Monta o system prompt final: base + projeto + artefatos + mapa de acesso. */
-function buildSystemPrompt(
-  context: z.infer<typeof chatContextSchema> | undefined,
-  access: SystemAccess[],
-  projectBlock: string | null,
-  artifactsBlock: string | null,
-  connectors?: ConnectorRuntime,
-  kbContext?: KbPromptContext | null,
-  multiAgentEnabled?: boolean,
-): string {
-  let prompt = DEXTER_SYSTEM_PROMPT
-  if (multiAgentEnabled) {
-    prompt += `\n\n${MULTI_AGENT_PROMPT_BLOCK}`
-  }
-  if (context?.system) {
-    prompt += `\n\nContexto desta conversa: sistema alvo "${context.system}".`
-  }
-  if (projectBlock) {
-    prompt += `\n\n${projectBlock}`
-  }
-  if (artifactsBlock) {
-    prompt += `\n\n${artifactsBlock}`
-  }
-  const kbBlock = formatKbBlock(kbContext ?? null)
-  if (kbBlock) {
-    prompt += `\n\n${kbBlock}`
-  }
-  prompt +=
-    "\n\n## Acesso deste usuário aos sistemas GoWork\n" +
-    accessSummary(access) +
-    "\n\n## Lembrete operacional (esta conversa)\n" +
-    "- Dados só via tools dos sistemas listados acima; sem tool = não sabe.\n" +
-    "- Especializada se couber; senão schema→SQL. Zero alucinação; total ≠ lista truncada.\n" +
-    "- Análise/investigação = dossiê (fatos + vínculos + implicação). Proibido superficial.\n" +
-    "- NetworkGo pessoas = profiles (nunca public.users). Códigos N#### em ticket_number.\n" +
-    "- Sem acesso ao sistema ou sem_acesso → diga isso; caso contrário tente consultar.\n" +
-    "- Português, assertivo, detalhado quando o pedido for análise."
-  if (connectors) {
-    prompt += connectorsPromptBlock(connectors)
-  }
-  return prompt
+interface SystemPromptInput {
+  context: z.infer<typeof chatContextSchema> | undefined
+  access: SystemAccess[]
+  projectBlock: string | null
+  artifactsBlock: string | null
+  /** Índice dos artefatos (sem conteúdo) — usado se o contexto estourar. */
+  artifactsTitlesBlock: string | null
+  connectors?: ConnectorRuntime
+  kbContext?: KbPromptContext | null
+  multiAgentEnabled?: boolean
+  /** Houve corte da janela deslizante — avisa o modelo no fim do prompt. */
+  historicoCortado?: boolean
+  /** Resumo rolling do trecho cortado (services/chat-summary.ts). */
+  resumoHistorico?: string | null
+  /** Trechos antigos recuperados por similaridade (services/message-embeddings). */
+  ragBlock?: string | null
 }
 
-/** Converte as mensagens do request para o formato Anthropic, incluindo os
- * anexos (imagem/PDF) da ÚLTIMA mensagem do usuário como blocos de conteúdo
- * (visão do Claude). Histórico anterior vai como texto simples.
- * Apêndice legado de artefatos é removido do content (fica só no system). */
-function toAnthropicMessages(
-  msgs: z.infer<typeof chatRequestSchema>["messages"]
-): Anthropic.MessageParam[] {
-  const nonSystem = msgs.filter((m) => m.role !== "system")
-  return nonSystem.map((m, i) => {
-    const content = stripArtifactAppendix(m.content)
-    const isLast = i === nonSystem.length - 1
-    if (isLast && m.role === "user" && m.attachments && m.attachments.length > 0) {
-      const blocks: Anthropic.ContentBlockParam[] = []
-      for (const a of m.attachments) {
-        if (a.type === "image") {
-          blocks.push({
-            type: "image",
-            source: {
-              type: "base64",
-              media_type: a.mediaType as "image/png",
-              data: a.dataBase64,
-            },
-          })
-        } else {
-          blocks.push({
-            type: "document",
-            source: { type: "base64", media_type: "application/pdf", data: a.dataBase64 },
-          })
-        }
-      }
-      if (content) blocks.push({ type: "text", text: content })
-      return { role: "user", content: blocks }
-    }
-    return { role: m.role as "user" | "assistant", content }
+interface SystemPromptMontado {
+  staticBlock: string
+  /** Blocos do dinâmico na ordem final — tipados para o context-budget. */
+  blocos: BlocoDinamico[]
+}
+
+/**
+ * Monta o system prompt em duas partes para o prompt caching da Anthropic:
+ *  - estático: base do Dexter + bloco multi-agentes + base de conhecimento
+ *    (muda no máximo quando o admin edita a KB — o kb-store já cacheia 60s);
+ *  - dinâmico: sistema alvo, projeto, artefatos, acesso, lembrete operacional,
+ *    conectores, resumo/RAG do histórico (muda a cada conversa/turno).
+ *
+ * O dinâmico sai como lista TIPADA (não string única) porque o gerente de
+ * orçamento (services/context-budget.ts) precisa saber o que pode degradar sem
+ * reordenar o prompt.
+ */
+function buildSystemPrompt(input: SystemPromptInput): SystemPromptMontado {
+  let staticBlock = DEXTER_SYSTEM_PROMPT
+  if (input.multiAgentEnabled) {
+    staticBlock += `\n\n${MULTI_AGENT_PROMPT_BLOCK}`
+  }
+  const kbBlock = formatKbBlock(input.kbContext ?? null)
+  if (kbBlock) {
+    staticBlock += `\n\n${kbBlock}`
+  }
+
+  const blocos: BlocoDinamico[] = []
+  if (input.context?.system) {
+    blocos.push({
+      tipo: "outro",
+      texto: `Contexto desta conversa: sistema alvo "${input.context.system}".`,
+    })
+  }
+  if (input.projectBlock) {
+    blocos.push({ tipo: "outro", texto: input.projectBlock })
+  }
+  if (input.artifactsBlock) {
+    blocos.push({
+      tipo: "artefatos",
+      texto: input.artifactsBlock,
+      titulos: input.artifactsTitlesBlock ?? input.artifactsBlock,
+    })
+  }
+  blocos.push({
+    tipo: "outro",
+    texto:
+      "## Acesso deste usuário aos sistemas GoWork\n" +
+      accessSummary(input.access),
   })
+  blocos.push({
+    tipo: "outro",
+    texto:
+      "## Lembrete operacional (esta conversa)\n" +
+      "- Dados só via tools dos sistemas listados acima; sem tool = não sabe.\n" +
+      "- Especializada se couber; senão schema→SQL. Zero alucinação; total ≠ lista truncada.\n" +
+      "- Análise/investigação = dossiê (fatos + vínculos + implicação). Proibido superficial.\n" +
+      "- NetworkGo pessoas = profiles (nunca public.users). Códigos N#### em ticket_number.\n" +
+      "- Sem acesso ao sistema ou sem_acesso → diga isso; caso contrário tente consultar.\n" +
+      "- Português, assertivo, detalhado quando o pedido for análise.",
+  })
+  if (input.connectors) {
+    const bloco = connectorsPromptBlock(input.connectors).trim()
+    if (bloco) blocos.push({ tipo: "outro", texto: bloco })
+  }
+  // Com resumo, o modelo recebe o conteúdo do trecho cortado em vez do aviso
+  // genérico de "peça para o usuário repetir".
+  if (input.resumoHistorico) {
+    blocos.push({
+      tipo: "resumo",
+      texto:
+        "## Resumo do histórico anterior desta conversa\n" +
+        input.resumoHistorico,
+    })
+  } else if (input.historicoCortado) {
+    blocos.push({ tipo: "outro", texto: NOTA_HISTORICO_CORTADO })
+  }
+  // Resumo (visão geral) e RAG (detalhe pontual) são complementares: quando os
+  // dois existem, os dois entram.
+  if (input.ragBlock) {
+    blocos.push({ tipo: "rag", texto: input.ragBlock })
+  }
+
+  return { staticBlock, blocos }
+}
+
+/** Histórico (já limpo e dentro da janela) + mensagem nova no formato
+ * Anthropic. Os anexos (imagem/PDF) da mensagem nova viram blocos de conteúdo
+ * (visão do Claude); o histórico vai como texto simples. */
+function toAnthropicMessages(
+  historico: LlmMessage[],
+  nova: {
+    content: string
+    attachments?: z.infer<typeof attachmentSchema>[]
+  },
+): Anthropic.MessageParam[] {
+  const msgs: Anthropic.MessageParam[] = historico.map((m) => ({
+    role: m.role,
+    content: m.content,
+  }))
+
+  const anexos = nova.attachments ?? []
+  if (anexos.length === 0) {
+    msgs.push({ role: "user", content: nova.content })
+    return msgs
+  }
+
+  const blocks: Anthropic.ContentBlockParam[] = []
+  for (const a of anexos) {
+    if (a.type === "image") {
+      blocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: a.mediaType as "image/png",
+          data: a.dataBase64,
+        },
+      })
+    } else {
+      blocks.push({
+        type: "document",
+        source: {
+          type: "base64",
+          media_type: "application/pdf",
+          data: a.dataBase64,
+        },
+      })
+    }
+  }
+  if (nova.content) blocks.push({ type: "text", text: nova.content })
+  msgs.push({ role: "user", content: blocks })
+  return msgs
 }
 
 /** Mensagem de erro enviada ao cliente no evento SSE `error`: só faixas
@@ -250,13 +370,40 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     }
     const body = parsed.data
 
-    const lastMessage = body.messages[body.messages.length - 1]
-    if (!lastMessage || lastMessage.role !== "user") {
-      reply.code(400).send({ error: "última mensagem do array precisa ser do usuário" })
+    // Formato novo (`message`) ou legado (última do `messages[]`) — o resto do
+    // histórico vem do banco nos dois casos.
+    const novaMensagem =
+      body.message ?? body.messages?.[body.messages.length - 1]
+    if (!novaMensagem || novaMensagem.role !== "user") {
+      reply.code(400).send({ error: "a mensagem enviada precisa ser do usuário" })
       return
     }
 
     const { userId, email, role } = await resolveUser(request)
+
+    // Rate limit por USUÁRIO (item 4.3). O limitador global do index.ts é por
+    // IP e, atrás do Traefik, o escritório inteiro divide o mesmo — por isso
+    // esta camada, que só existe depois da autenticação.
+    const cota = await consumirCotaDeChat(userId)
+    if (!cota.permitido) {
+      request.log.warn(
+        {
+          traceId: request.traceId,
+          userId,
+          usadas: cota.usadas,
+          limite: cota.limite,
+        },
+        "rate limit por usuário atingido no /api/chat",
+      )
+      reply
+        .code(429)
+        .header("retry-after", String(cota.retryAfterSec))
+        .send({
+          error: "rate_limited",
+          message: mensagemLimiteAtingido(cota),
+        })
+      return
+    }
 
     // Preflight de acesso: o que este usuário (por email) enxerga em cada
     // sistema. Vazio se não houver email ou nenhum sistema configurado.
@@ -270,7 +417,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     const existingMessages = await getMessages(body.threadId, userId)
     const isNewChat = existingMessages.length === 0
     const title = isNewChat
-      ? stripArtifactAppendix(lastMessage.content).slice(0, 60)
+      ? stripArtifactAppendix(novaMensagem.content).slice(0, 60)
       : undefined
 
     await upsertChat({
@@ -287,7 +434,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     })
 
     // Texto limpo do usuário (sem apêndice legado de artefatos).
-    const userText = stripArtifactAppendix(lastMessage.content)
+    const userText = stripArtifactAppendix(novaMensagem.content)
 
     // Regenerar / retry: se a última mensagem persistida já é este mesmo
     // turno do usuário, não duplica o insert (o front truncou só a resposta).
@@ -307,12 +454,62 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       })
     }
 
-    const llmMessages: LlmMessage[] = body.messages
+    // Contexto do turno: histórico do BANCO (o front manda só a mensagem nova)
+    // cortado pela janela deslizante. Quando o turno do usuário já estava
+    // persistido (regenerar), a última linha é a própria mensagem nova e sai
+    // daqui para não entrar duas vezes.
+    const historicoPersistido: LlmMessage[] = existingMessages
+      .slice(0, alreadyStoredUser ? -1 : undefined)
       .filter((m) => m.role !== "system")
       .map((m) => ({
         role: m.role as "user" | "assistant",
         content: stripArtifactAppendix(m.content),
       }))
+      // Conteúdo vazio quebra a API (bloco de texto precisa ter texto).
+      .filter((m) => m.content.trim().length > 0)
+
+    const janela = aplicarJanela(
+      historicoPersistido,
+      config.CONTEXT_WINDOW_MESSAGES,
+    )
+
+    // Resumo rolling do que ficou fora da janela. Só entra se a última
+    // mensagem coberta ainda existe: depois de editar/regenerar, o resumo
+    // descreveria turnos apagados — nesse caso vale mais a nota genérica.
+    let resumoHistorico: string | null = null
+    if (janela.cortou) {
+      try {
+        const resumo = await getChatSummary(body.threadId)
+        if (
+          resumo &&
+          existingMessages.some(
+            (m) => m.id === resumo.covered_until_message_id,
+          )
+        ) {
+          resumoHistorico = resumo.text
+        }
+      } catch (err) {
+        request.log.warn(
+          { err, traceId: request.traceId, chatId: body.threadId },
+          "resumo do histórico indisponível neste run",
+        )
+      }
+    }
+
+    // RAG do histórico antigo (item 1.9): só quando a janela cortou algo — se
+    // a conversa inteira cabe no prompt, não há o que recuperar. Complementa o
+    // resumo (visão geral) com o detalhe pontual. Falha aqui devolve [].
+    const trechosRag = janela.cortou
+      ? await buscarTrechosRelevantes({
+          chatId: body.threadId,
+          userId,
+          pergunta: userText,
+          limite: 3,
+          traceId: request.traceId,
+          log: request.log,
+        })
+      : []
+    const ragBlock = formatarBlocoRag(trechosRag)
 
     // Instruções/arquivos do projeto: prioriza o project_id persistido no chat.
     const chatRow = await getChat(body.threadId, userId)
@@ -323,6 +520,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
 
     const artifactsFromContext = (body.context?.artifacts ?? []) as ArtifactWire[]
     const artifactsBlock = formatArtifactsSystemBlock(artifactsFromContext)
+    const artifactsTitlesBlock = formatArtifactsTitlesBlock(artifactsFromContext)
 
     // Base de conhecimento da empresa (cache de 60s no store). Falha aqui NÃO
     // derruba o chat — segue sem o bloco, com o motivo no log.
@@ -333,15 +531,19 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       request.log.warn({ err }, "base de conhecimento indisponível neste run")
     }
 
-    const systemPrompt = buildSystemPrompt(
-      body.context,
+    const promptMontado = buildSystemPrompt({
+      context: body.context,
       access,
       projectBlock,
       artifactsBlock,
+      artifactsTitlesBlock,
       connectors,
       kbContext,
       multiAgentEnabled,
-    )
+      historicoCortado: janela.cortou,
+      resumoHistorico,
+      ragBlock,
+    })
 
     // Modelo escolhido na interface (context.model) — catálogo admin + default,
     // respeitando os modelos liberados para este usuário (profiles.allowed_models).
@@ -349,6 +551,73 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       userId,
       role,
     })
+
+    // Orçamento de contexto (item 1.10): estima o payload e degrada (artefatos
+    // → títulos, janela menor, RAG fora) ANTES de o provider devolver
+    // context_length_exceeded no meio do run.
+    const ajuste = ajustarContexto({
+      systemStatic: promptMontado.staticBlock,
+      blocosDinamicos: promptMontado.blocos,
+      historico: janela.mensagens,
+      novaMensagem: userText,
+      inputTokenLimit: modelInfo.inputTokenLimit,
+      margemSaidaTokens: responseMaxTokens(modelInfo.model),
+    })
+    for (const corte of ajuste.cortes) {
+      request.log.info(
+        {
+          traceId: request.traceId,
+          chatId: body.threadId,
+          model: modelInfo.id,
+          acao: corte.acao,
+          tokensAntes: corte.tokensAntes,
+          tokensDepois: corte.tokensDepois,
+          orcamentoTokens: ajuste.orcamentoTokens,
+          detalhe: corte.detalhe,
+        },
+        "contexto degradado para caber no orçamento do modelo",
+      )
+    }
+    if (!ajuste.dentroDoOrcamento) {
+      request.log.warn(
+        {
+          traceId: request.traceId,
+          chatId: body.threadId,
+          model: modelInfo.id,
+          tokensEstimados: ajuste.metricas.total,
+          orcamentoTokens: ajuste.orcamentoTokens,
+        },
+        "contexto acima do orçamento mesmo após degradar tudo",
+      )
+    }
+
+    const systemPrompt: SystemPromptParts = {
+      staticBlock: promptMontado.staticBlock,
+      dynamicBlock: juntarBlocosDinamicos(ajuste.blocosDinamicos),
+    }
+    const historicoJanela: LlmMessage[] = ajuste.historico
+    const llmMessages: LlmMessage[] = [
+      ...historicoJanela,
+      { role: "user", content: userText },
+    ]
+
+    // Métricas de input por componente (item 1.11): é o que permite ver PARA
+    // ONDE o input está indo sem abrir o payload. Só log — nada em banco.
+    request.log.info(
+      {
+        traceId: request.traceId,
+        chatId: body.threadId,
+        model: modelInfo.id,
+        orcamentoTokens: ajuste.orcamentoTokens,
+        cortes: ajuste.cortes.length,
+        janelaMensagens: historicoJanela.length,
+        ragTrechos: ajuste.blocosDinamicos.some((b) => b.tipo === "rag")
+          ? trechosRag.length
+          : 0,
+        tokens: ajuste.metricas,
+      },
+      "input estimado por componente",
+    )
 
     const userKeys = await listUserKeys(userId).catch(() => [])
     const personalProviders = new Set(
@@ -373,7 +642,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       ? await getEffectiveKey(modelInfo.provider, userId)
       : undefined
 
-    const lastAttachments = lastMessage.attachments ?? []
+    const lastAttachments = novaMensagem.attachments ?? []
     if (lastAttachments.length > 0) {
       const wantsImage = lastAttachments.some((a) => a.type === "image")
       const wantsFile = lastAttachments.some((a) => a.type === "document")
@@ -415,6 +684,14 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         return
       }
     }
+
+    // Guarda do orçamento mensal DENTRO do run (item 4.4): null quando o
+    // usuário não tem teto em profiles.usage_budget_usd — nesse caso os loops
+    // nem chamam a checagem.
+    const budgetGuard = await criarGuardaOrcamento({
+      userId,
+      modelId: modelInfo.id,
+    })
 
     initSSE(reply)
 
@@ -458,6 +735,9 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     let usedModel = modelInfo.model
     let tokensIn: number | undefined
     let tokensOut: number | undefined
+    /** Prompt caching (só Anthropic) — gravados separados de tokensIn. */
+    let tokensCacheWrite: number | undefined
+    let tokensCacheRead: number | undefined
     const toolCalls: ToolCallRecord[] = []
 
     let assistantMessageId: string | undefined
@@ -483,13 +763,23 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       const corpo =
         texto || "_(sem resposta do modelo — veja os passos desta execução)_"
       try {
+        const cacheTokens = {
+          cacheWriteTokens: tokensCacheWrite,
+          cacheReadTokens: tokensCacheRead,
+        }
         let costUsd = await computeMessageCostUsd(
           modelInfo.id,
           tokensIn,
           tokensOut,
+          cacheTokens,
         )
         if (costUsd == null && usedModel) {
-          costUsd = await computeMessageCostUsd(usedModel, tokensIn, tokensOut)
+          costUsd = await computeMessageCostUsd(
+            usedModel,
+            tokensIn,
+            tokensOut,
+            cacheTokens,
+          )
         }
         assistantMessageId = await insertMessage({
           chatId: body.threadId,
@@ -499,9 +789,14 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
           model: usedModel,
           tokensIn,
           tokensOut,
+          tokensCacheWrite,
+          tokensCacheRead,
           costUsd,
           traceId: request.traceId,
         })
+        // O gasto do mês acabou de mudar — o cache de 30s da guarda de
+        // orçamento não pode continuar servindo o valor anterior.
+        invalidarCacheDeGasto(userId)
       } catch (err) {
         // O front sincroniza a cauda depois do run: sem esta linha a resposta
         // desaparece da tela. Sinaliza para o run terminar em `error`, não em
@@ -553,6 +848,24 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
+    let posRunAgendado = false
+    /**
+     * Trabalho pós-run: resumo rolling do histórico que saiu da janela (1.7) e
+     * indexação dessas mensagens para o RAG (1.9). Vai para a fila quando há
+     * Redis; sem Redis roda no processo, sem await — é acessório e não pode
+     * atrasar o `done` nem derrubar a resposta.
+     */
+    const agendarResumo = (): void => {
+      if (posRunAgendado) return
+      posRunAgendado = true
+      agendarPosRun({
+        chatId: body.threadId,
+        userId,
+        traceId: request.traceId,
+        log: request.log,
+      })
+    }
+
     try {
       const onToolCallEmit = (rec: ToolCallRecord): void => {
         toolCalls.push(rec)
@@ -566,7 +879,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         })
       }
 
-      const userPrompt = stripArtifactAppendix(lastMessage.content).trim()
+      const userPrompt = userText.trim()
       const references = lastAttachments
         .filter((a) => a.type === "image")
         .map((a) => ({
@@ -663,14 +976,19 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         const result = await runAgentLoop({
           model: modelInfo.model,
           systemPrompt,
-          messages: toAnthropicMessages(body.messages),
+          messages: toAnthropicMessages(historicoJanela, {
+            content: userText,
+            attachments: lastAttachments,
+          }),
           access,
           connectors,
           userId,
           email: email ?? "",
+          projectId: projectId ?? undefined,
           apiKey: providerApiKey,
           signal: controller.signal,
           multiAgentEnabled,
+          budgetGuard: budgetGuard ?? undefined,
           onTextDelta: (t) => {
             fullText += t
             emit({ event: "text-delta", data: { textDelta: t } })
@@ -681,6 +999,8 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         usedModel = result.model
         tokensIn = result.inputTokens
         tokensOut = result.outputTokens
+        tokensCacheWrite = result.cacheWriteTokens
+        tokensCacheRead = result.cacheReadTokens
         endReason = result.endReason
         steps = result.steps
       } else if (isOpenAiCompatibleProvider(modelInfo.provider)) {
@@ -694,9 +1014,11 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
           connectors,
           userId,
           email: email ?? "",
+          projectId: projectId ?? undefined,
           apiKey: providerApiKey,
           signal: controller.signal,
           multiAgentEnabled,
+          budgetGuard: budgetGuard ?? undefined,
           onTextDelta: (t) => {
             fullText += t
             emit({ event: "text-delta", data: { textDelta: t } })
@@ -718,7 +1040,8 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
         const handle = streamChat({
           provider: modelInfo.provider,
           model: modelInfo.model,
-          systemPrompt,
+          // Ollama não tem prompt caching — vai o texto único.
+          systemPrompt: flattenSystemPrompt(systemPrompt),
           messages: llmMessages,
           signal: controller.signal,
           apiKey: providerApiKey,
@@ -753,6 +1076,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
       )
       await persistirResposta()
       await gravarAuditoria()
+      agendarResumo()
       if (persistFalhou) {
         emit({
           event: "error",
@@ -794,6 +1118,7 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
 
       await persistirResposta()
       await gravarAuditoria()
+      agendarResumo()
       if (!aborted || timedOut) {
         emit({ event: "error", data: { message } })
       }
@@ -815,5 +1140,6 @@ export default async function chatRoutes(app: FastifyInstance): Promise<void> {
     // gravada (ambas idempotentes).
     await persistirResposta()
     await gravarAuditoria()
+    agendarResumo()
   })
 }

@@ -13,6 +13,7 @@ import Anthropic from "@anthropic-ai/sdk"
 
 import { config } from "../config.js"
 import { responseMaxTokens } from "../llm/models.js"
+import type { SystemPromptParts } from "../llm/system-prompt.js"
 import { getGlobalKey } from "../services/llm-keys.js"
 
 const clients = new Map<string, Anthropic>()
@@ -37,9 +38,36 @@ export async function getAnthropicClient(apiKey?: string): Promise<Anthropic> {
   return client
 }
 
+/**
+ * Converte o system prompt para os blocos que a API recebe.
+ *
+ * Com `SystemPromptParts`, o bloco estático ganha `cache_control: ephemeral` —
+ * a Anthropic reaproveita esse prefixo por 5 min e cobra ~10% do preço de
+ * input nos tokens lidos do cache. Prompt em string única (sub-agente, router)
+ * não tem como separar o que é estável, então vai sem cache.
+ */
+export function toAnthropicSystemBlocks(
+  prompt: string | SystemPromptParts,
+): Anthropic.TextBlockParam[] {
+  if (typeof prompt === "string") {
+    return [{ type: "text", text: prompt }]
+  }
+  const blocks: Anthropic.TextBlockParam[] = [
+    {
+      type: "text",
+      text: prompt.staticBlock,
+      cache_control: { type: "ephemeral" },
+    },
+  ]
+  if (prompt.dynamicBlock) {
+    blocks.push({ type: "text", text: prompt.dynamicBlock })
+  }
+  return blocks
+}
+
 export interface AnthropicStreamOptions {
   model?: string
-  systemPrompt: string
+  systemPrompt: string | SystemPromptParts
   messages: Anthropic.MessageParam[]
   maxTokens?: number
   signal?: AbortSignal
@@ -61,7 +89,7 @@ export function streamChatAnthropic(opts: AnthropicStreamOptions): AnthropicStre
       {
         model,
         max_tokens: opts.maxTokens ?? responseMaxTokens(model),
-        system: opts.systemPrompt,
+        system: toAnthropicSystemBlocks(opts.systemPrompt),
         messages: opts.messages,
       },
       { signal: opts.signal },

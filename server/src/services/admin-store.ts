@@ -136,11 +136,96 @@ export async function fetchAdminCostCenter(days = 30): Promise<unknown> {
   return data
 }
 
+export interface AdminCacheAggregates {
+  /** Mensagens do período que têm métrica de prompt caching. */
+  messages: number
+  /** Tokens de entrada NÃO cacheados dessas mensagens. */
+  tokens_in: number
+  tokens_cache_write: number
+  tokens_cache_read: number
+  /** cache_read / (tokens_in + cache_read). Null quando não há base. */
+  cache_hit_rate: number | null
+  /** Bateu o teto de linhas lidas — os números viram piso, não total. */
+  truncated: boolean
+}
+
+/** Páginas do PostgREST na varredura de cache (default do Supabase é 1000). */
+const CACHE_ROWS_PAGE = 1_000
+/** Teto de linhas somadas — evita puxar meses inteiros de mensagens. */
+const CACHE_ROWS_MAX = 20_000
+
+/**
+ * Agregados de prompt caching do período.
+ *
+ * Vai por query direta em vez de entrar na RPC `dexter_admin_overview`: a RPC
+ * é compartilhada com o histórico do painel e alterá-la exigiria recriar a
+ * função em produção. Só varre mensagens que TÊM métrica de cache (índice
+ * parcial da migration 0033), então o custo é proporcional ao uso Anthropic.
+ */
+async function fetchCacheAggregates(
+  days: number,
+): Promise<AdminCacheAggregates> {
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString()
+  let messages = 0
+  let tokensIn = 0
+  let cacheWrite = 0
+  let cacheRead = 0
+  let truncated = false
+
+  for (let offset = 0; offset < CACHE_ROWS_MAX; offset += CACHE_ROWS_PAGE) {
+    const { data, error } = await supabase
+      .from("agent_messages")
+      .select("tokens_in, tokens_cache_write, tokens_cache_read")
+      .gte("created_at", since)
+      .or("tokens_cache_read.not.is.null,tokens_cache_write.not.is.null")
+      .order("created_at", { ascending: false })
+      .range(offset, offset + CACHE_ROWS_PAGE - 1)
+
+    if (error) throw new Error(`agregados de cache: ${error.message}`)
+    const rows = data ?? []
+    for (const row of rows) {
+      messages += 1
+      tokensIn += Number(row.tokens_in ?? 0)
+      cacheWrite += Number(row.tokens_cache_write ?? 0)
+      cacheRead += Number(row.tokens_cache_read ?? 0)
+    }
+    if (rows.length < CACHE_ROWS_PAGE) {
+      return {
+        messages,
+        tokens_in: tokensIn,
+        tokens_cache_write: cacheWrite,
+        tokens_cache_read: cacheRead,
+        cache_hit_rate:
+          tokensIn + cacheRead > 0 ? cacheRead / (tokensIn + cacheRead) : null,
+        truncated: false,
+      }
+    }
+    truncated = true
+  }
+
+  return {
+    messages,
+    tokens_in: tokensIn,
+    tokens_cache_write: cacheWrite,
+    tokens_cache_read: cacheRead,
+    cache_hit_rate:
+      tokensIn + cacheRead > 0 ? cacheRead / (tokensIn + cacheRead) : null,
+    truncated,
+  }
+}
+
 export async function fetchAdminOverview(days = 30): Promise<unknown> {
   const { data, error } = await supabase.rpc("dexter_admin_overview", {
     p_days: days,
   })
   if (error) throw new Error(`overview falhou: ${error.message}`)
+
+  // Falha no agregado de cache não pode derrubar o painel inteiro — o front
+  // trata `cache: null` como "sem dados de caching neste período".
+  const cache = await fetchCacheAggregates(days).catch(() => null)
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    return { ...(data as Record<string, unknown>), cache }
+  }
   return data
 }
 

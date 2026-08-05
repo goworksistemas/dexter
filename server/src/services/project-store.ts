@@ -9,8 +9,12 @@ import { supabase } from "../lib/supabase.js"
 import { ForbiddenError, NotFoundError } from "./auth.js"
 
 const BUCKET = "project-files"
-/** Limite de chars de arquivos texto injetados no system prompt. */
-const TEXT_CONTEXT_CHAR_LIMIT = 48_000
+/**
+ * Teto por leitura da tool `project__read_file`. O conteúdo dos arquivos NÃO
+ * vai mais no system prompt (custava até 48k chars em toda mensagem) — o
+ * modelo lê o que precisar, quando precisar.
+ */
+export const PROJECT_FILE_READ_MAX_CHARS = 24_000
 const MAX_FILE_BYTES = 10 * 1024 * 1024
 const TEXT_MIME_PREFIXES = ["text/"]
 const TEXT_EXTENSIONS = new Set([
@@ -360,7 +364,9 @@ export async function deleteProjectFile(
 
 /**
  * Monta o bloco de contexto do projeto para o system prompt:
- * instruções + lista de arquivos + conteúdo textual (com limite).
+ * instruções + ÍNDICE dos arquivos (id, nome, tipo, tamanho). O conteúdo sai
+ * sob demanda pela tool `project__read_file` — injetar tudo aqui reenviava
+ * dezenas de milhares de chars a cada mensagem da conversa.
  */
 export async function buildProjectPromptBlock(
   projectId: string,
@@ -394,35 +400,88 @@ export async function buildProjectPromptBlock(
 
   parts.push("\n## Arquivos do projeto")
   for (const f of files) {
+    const tipo = f.mime_type ?? "tipo desconhecido"
+    const legivel = isTextFile(f.name, f.mime_type) ? "" : " · não é texto"
     parts.push(
-      `- ${f.name} (${f.mime_type ?? "tipo desconhecido"}, ${f.size_bytes} bytes)`,
+      `- ${f.name} (${tipo}, ${f.size_bytes} bytes${legivel}) — file_id: ${f.id}`,
+    )
+  }
+  parts.push(
+    "\nO conteúdo dos arquivos NÃO está neste prompt. Para ler qualquer um " +
+      "deles, chame a tool `project__read_file` com o `file_id` da lista acima. " +
+      "Leia antes de responder qualquer coisa que dependa do conteúdo — não " +
+      "suponha o que está dentro do arquivo pelo nome.",
+  )
+
+  return parts.join("\n")
+}
+
+export interface ProjectFileContent {
+  name: string
+  mimeType: string | null
+  sizeBytes: number
+  content: string
+  truncated: boolean
+}
+
+/**
+ * Lê o conteúdo textual de um arquivo do projeto (tool `project__read_file`).
+ * Ownership do projeto E do arquivo; binário/PDF é recusado com mensagem clara.
+ * Conteúdo cortado em `PROJECT_FILE_READ_MAX_CHARS` por leitura.
+ */
+export async function readProjectFileText(
+  projectId: string,
+  fileId: string,
+  userId: string,
+): Promise<ProjectFileContent> {
+  await assertProjectOwned(projectId, userId)
+
+  const { data, error } = await supabase
+    .from("agent_project_files")
+    .select("id, project_id, name, storage_path, mime_type, size_bytes, created_at")
+    .eq("id", fileId)
+    .eq("project_id", projectId)
+    .eq("user_id", userId)
+    .maybeSingle()
+
+  if (error) {
+    throw new Error(`readProjectFileText lookup falhou: ${error.message}`)
+  }
+  if (!data) {
+    throw new NotFoundError(
+      "Arquivo não encontrado neste projeto. Use um file_id do índice de arquivos.",
     )
   }
 
-  let budget = TEXT_CONTEXT_CHAR_LIMIT
-  const textFiles = files.filter((f) => isTextFile(f.name, f.mime_type))
-  if (textFiles.length > 0 && budget > 0) {
-    parts.push("\n## Conteúdo dos arquivos de texto do projeto")
-    for (const f of textFiles) {
-      if (budget <= 0) break
-      const { data, error } = await supabase.storage
-        .from(BUCKET)
-        .download(f.storage_path)
-      if (error || !data) {
-        parts.push(`\n### ${f.name}\n(não foi possível ler o arquivo)`)
-        continue
-      }
-      const raw = await data.text()
-      const slice = raw.slice(0, budget)
-      budget -= slice.length
-      parts.push(`\n### ${f.name}\n\`\`\`\n${slice}\n\`\`\``)
-      if (raw.length > slice.length) {
-        parts.push("(conteúdo truncado por limite de contexto)")
-      }
-    }
+  const file = data as ProjectFileRecord
+  if (!isTextFile(file.name, file.mime_type)) {
+    throw Object.assign(
+      new Error(
+        `"${file.name}" (${file.mime_type ?? "tipo desconhecido"}) não é um arquivo de texto — ` +
+          "leitura de binário/PDF não é suportada. Peça ao usuário para anexar o conteúdo na conversa.",
+      ),
+      { statusCode: 400 },
+    )
   }
 
-  return parts.join("\n")
+  const { data: blob, error: downloadErr } = await supabase.storage
+    .from(BUCKET)
+    .download(file.storage_path)
+  if (downloadErr || !blob) {
+    throw new Error(
+      `não foi possível baixar "${file.name}": ${downloadErr?.message ?? "arquivo indisponível"}`,
+    )
+  }
+
+  const raw = await blob.text()
+  const truncated = raw.length > PROJECT_FILE_READ_MAX_CHARS
+  return {
+    name: file.name,
+    mimeType: file.mime_type,
+    sizeBytes: file.size_bytes,
+    content: truncated ? raw.slice(0, PROJECT_FILE_READ_MAX_CHARS) : raw,
+    truncated,
+  }
 }
 
 /** Valida se o projectId existe e pertence ao usuário (para upsert de chat). */

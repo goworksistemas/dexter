@@ -55,6 +55,7 @@ import {
   saveProviderKey,
   saveUserKey,
 } from "../services/llm-keys.js"
+import { isQueueEnabled, queueCounts } from "../lib/queue.js"
 import { invalidateModelAccessCache } from "../services/model-access.js"
 import { resolveUser } from "../services/auth.js"
 import { NotFoundError } from "../services/errors.js"
@@ -266,6 +267,21 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
         balance_usd: p.balance_usd,
         low_threshold_usd: p.low_threshold_usd,
       })),
+      actorRole: actor.role as DexterRole,
+    }
+  })
+
+  /**
+   * Contadores das filas BullMQ (item 2.1). `enabled: false` = sem REDIS_URL,
+   * ou seja, os jobs rodam in-process e não há fila para inspecionar.
+   */
+  app.get("/api/admin/queues", async (req) => {
+    const user = await resolveUser(req)
+    const actor = await loadActorProfile(user.userId, user.email)
+    await assertStaff(actor)
+    return {
+      enabled: isQueueEnabled(),
+      queues: await queueCounts(),
       actorRole: actor.role as DexterRole,
     }
   })

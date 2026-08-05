@@ -38,6 +38,10 @@ export interface InsertMessageParams {
   model?: string
   tokensIn?: number
   tokensOut?: number
+  /** Prompt caching da Anthropic: tokens gravados no cache (1,25× o input). */
+  tokensCacheWrite?: number
+  /** Prompt caching da Anthropic: tokens lidos do cache (0,10× o input). */
+  tokensCacheRead?: number
   costUsd?: number | null
   traceId?: string
 }
@@ -165,6 +169,12 @@ export async function insertMessage(params: InsertMessageParams): Promise<string
   if (params.model !== undefined) row.model = params.model
   if (params.tokensIn !== undefined) row.tokens_in = params.tokensIn
   if (params.tokensOut !== undefined) row.tokens_out = params.tokensOut
+  if (params.tokensCacheWrite !== undefined) {
+    row.tokens_cache_write = params.tokensCacheWrite
+  }
+  if (params.tokensCacheRead !== undefined) {
+    row.tokens_cache_read = params.tokensCacheRead
+  }
   if (params.costUsd !== undefined) row.cost_usd = params.costUsd
   if (params.traceId !== undefined) row.trace_id = params.traceId
 

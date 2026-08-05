@@ -12,6 +12,11 @@ import {
 } from "../lib/openai-compatible.js"
 import { isImageGenerationModel } from "../llm/capabilities.js"
 import { responseMaxTokensFor } from "../llm/models.js"
+import type { GuardaOrcamento } from "../services/run-budget.js"
+import {
+  flattenSystemPrompt,
+  type SystemPromptParts,
+} from "../llm/system-prompt.js"
 import {
   resumirArgs,
   resumirResultado,
@@ -38,7 +43,8 @@ import type {
 export interface OpenAiAgentLoopOptions {
   provider: OcProvider
   model: string
-  systemPrompt: string
+  /** Blocos aceitos por conveniência: aqui não há cache, então vira string. */
+  systemPrompt: string | SystemPromptParts
   /** Histórico user/assistant em texto. */
   messages: Array<{ role: "user" | "assistant"; content: string }>
   /** Anexos da última mensagem do usuário (visão/PDF). */
@@ -52,6 +58,8 @@ export interface OpenAiAgentLoopOptions {
   connectors?: ConnectorRuntime
   userId: string
   email: string
+  /** Projeto do chat — habilita/roteia a tool project__read_file. */
+  projectId?: string
   signal?: AbortSignal
   onTextDelta: (text: string) => void
   onToolCall: (rec: ToolCallRecord) => void
@@ -61,6 +69,11 @@ export interface OpenAiAgentLoopOptions {
   /** Chave a usar (BYOK/global). Sem ela, resolve a global (banco → env). */
   apiKey?: string
   multiAgentEnabled?: boolean
+  /**
+   * Guarda do orçamento mensal (services/run-budget.ts) — mesma semântica do
+   * loop Anthropic: checada a cada `aCadaSteps` tool calls.
+   */
+  budgetGuard?: GuardaOrcamento
 }
 
 function truncarToolResult(raw: string, max: number): string {
@@ -75,6 +88,17 @@ const PROMPT_FINAL_FORCADO =
   "interpretação e recomendação se couber. Use tabelas markdown quando houver dados. " +
   "NÃO chame mais tools. NÃO invente o que não veio nas tools. " +
   "Se faltar dado crítico, diga exatamente o que falta e o que já apurou."
+
+const PROMPT_FINAL_ORCAMENTO =
+  "O orçamento mensal de uso deste usuário foi atingido durante esta resposta. " +
+  "NÃO chame mais tools. Com o que já coletou acima, escreva AGORA a resposta " +
+  "final em português, completa até onde os dados permitem, e deixe explícito " +
+  "o que ficou sem apurar. NÃO invente o que não veio nas tools."
+
+/** Aviso determinístico — não depende de o modelo lembrar de mencionar. */
+const AVISO_ORCAMENTO =
+  "\n\n_Orçamento mensal de uso atingido: encerrei esta resposta com o que já " +
+  "havia consultado. Fale com um administrador para ampliar o limite._"
 
 export async function runOpenAiAgentLoop(
   opts: OpenAiAgentLoopOptions,
@@ -92,12 +116,13 @@ export async function runOpenAiAgentLoop(
     access: opts.access,
     connectors: opts.connectors,
     userId: opts.userId,
+    projectId: opts.projectId,
     multiAgentEnabled: opts.multiAgentEnabled,
   })
   const maxTokens = await responseMaxTokensFor(opts.model)
 
   const messages: OcMessage[] = [
-    { role: "system", content: opts.systemPrompt },
+    { role: "system", content: flattenSystemPrompt(opts.systemPrompt) },
   ]
   opts.messages.forEach((m, i) => {
     const isLast = i === opts.messages.length - 1
@@ -127,6 +152,8 @@ export async function runOpenAiAgentLoop(
   let textoEmitido = ""
   const toolFailCounts = new Map<string, number>()
   let spawnCount = 0
+  /** Orçamento mensal estourou no meio deste run (item 4.4). */
+  let orcamentoEstourado = false
 
   const progress = (evt: AgentProgressEvent): void => {
     opts.onProgress?.(evt)
@@ -281,6 +308,7 @@ export async function runOpenAiAgentLoop(
             access: opts.access,
             connectors: opts.connectors,
             signal: opts.signal,
+            projectId: opts.projectId,
             multiAgentEnabled: opts.multiAgentEnabled,
             model: opts.model,
             apiKey: opts.apiKey,
@@ -340,10 +368,27 @@ export async function runOpenAiAgentLoop(
           : `Erro ao consultar: ${exec.error}`
         respondTool(tc, truncarToolResult(raw, toolResultMax))
         respondidas += 1
+
+        // Orçamento mensal: custo acumulado do run × o que resta do teto do mês.
+        if (opts.budgetGuard && step % opts.budgetGuard.aCadaSteps === 0) {
+          orcamentoEstourado = await opts.budgetGuard.estourou({
+            inputTokens,
+            outputTokens,
+          })
+          if (orcamentoEstourado) break
+        }
       }
 
-      // Tools pedidas no mesmo turno mas não executadas (bateu maxSteps).
+      // Tools pedidas no mesmo turno mas não executadas (maxSteps ou orçamento).
       stubRestantes(toolCalls.slice(respondidas))
+
+      if (orcamentoEstourado) {
+        messages.push({ role: "user", content: PROMPT_FINAL_ORCAMENTO })
+        await turn(false)
+        endReason = "budget"
+        emitirTexto(AVISO_ORCAMENTO)
+        break
+      }
 
       if (step >= maxSteps || round >= maxRounds - 1) {
         messages.push({ role: "user", content: PROMPT_FINAL_FORCADO })

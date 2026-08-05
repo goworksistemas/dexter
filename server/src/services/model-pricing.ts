@@ -98,15 +98,39 @@ export async function ensureModelPricingRows(ids: string[]): Promise<void> {
   if (error) throw new Error(`ensureModelPricingRows: ${error.message}`)
 }
 
+/**
+ * Multiplicadores do prompt caching sobre o preço de INPUT do modelo, da
+ * tabela pública da Anthropic: gravar no cache custa 1,25× (TTL de 5 min) e
+ * ler do cache custa 0,10×.
+ * https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+ */
+const CACHE_WRITE_PRICE_MULTIPLIER = 1.25
+const CACHE_READ_PRICE_MULTIPLIER = 0.1
+
+export interface CacheTokens {
+  /** cache_creation_input_tokens do usage da Anthropic. */
+  cacheWriteTokens?: number
+  /** cache_read_input_tokens do usage da Anthropic. */
+  cacheReadTokens?: number
+}
+
+/**
+ * Custo da mensagem em USD. `tokensIn` são só os tokens de entrada NÃO
+ * cacheados; os tokens de cache entram ponderados pelos multiplicadores acima
+ * (providers sem prompt caching simplesmente não passam esse argumento).
+ */
 export async function computeMessageCostUsd(
   catalogModelId: string | undefined,
   tokensIn?: number,
   tokensOut?: number,
+  cache?: CacheTokens,
 ): Promise<number | null> {
   if (!catalogModelId) return null
   const tin = tokensIn ?? 0
   const tout = tokensOut ?? 0
-  if (tin <= 0 && tout <= 0) return null
+  const tWrite = cache?.cacheWriteTokens ?? 0
+  const tRead = cache?.cacheReadTokens ?? 0
+  if (tin <= 0 && tout <= 0 && tWrite <= 0 && tRead <= 0) return null
 
   const map = await pricingMap()
   const row = resolvePricingRow(map, catalogModelId)
@@ -114,11 +138,15 @@ export async function computeMessageCostUsd(
     return null
   }
 
-  const inCost =
-    (tin / 1_000_000) * (row.input_usd_per_million ?? 0)
+  const inputPrice = row.input_usd_per_million ?? 0
+  const inCost = (tin / 1_000_000) * inputPrice
+  const writeCost =
+    (tWrite / 1_000_000) * inputPrice * CACHE_WRITE_PRICE_MULTIPLIER
+  const readCost =
+    (tRead / 1_000_000) * inputPrice * CACHE_READ_PRICE_MULTIPLIER
   const outCost =
     (tout / 1_000_000) * (row.output_usd_per_million ?? 0)
-  const total = inCost + outCost
+  const total = inCost + writeCost + readCost + outCost
   return total > 0 ? roundCostUsd(total) : null
 }
 

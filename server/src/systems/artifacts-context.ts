@@ -63,6 +63,37 @@ const ARTIFACT_EDIT_RULES =
   "4. Só crie um artefato de outro kind se o usuário pedir explicitamente outro formato/documento.\n" +
   "5. Se o artefato estiver marcado INCOMPLETO, continue a partir dele até fechar HTML/Markdown válidos.\n\n"
 
+/**
+ * Versão degradada do bloco de artefatos: só o índice (título/kind/versão), sem
+ * conteúdo. Usada pelo gerente de orçamento de contexto (services/context-budget)
+ * quando o payload não cabe na janela do modelo — o artefato costuma ser o
+ * maior bloco isolado do prompt. O modelo continua sabendo que ele existe, mas
+ * é instruído a NÃO reescrever às cegas.
+ */
+export function formatArtifactsTitlesBlock(
+  artifacts: ArtifactWire[],
+): string | null {
+  const selected = selectArtifactsForContext(artifacts)
+  if (selected.length === 0) return null
+
+  const lista = selected
+    .map(
+      (a) =>
+        `- ${a.title} (${a.kind}, v${a.version}${a.is_truncated ? ", INCOMPLETO" : ""})`,
+    )
+    .join("\n")
+
+  return (
+    "## Artefatos da conversa (índice — conteúdo omitido)\n" +
+    "O conteúdo dos artefatos abaixo NÃO coube no contexto desta resposta.\n" +
+    lista +
+    "\n\nSe o pedido do usuário for editar/completar um deles, diga que o " +
+    "documento ficou grande demais para caber junto com o resto da conversa e " +
+    "peça um recorte (a seção específica). NÃO recrie o artefato do zero e NÃO " +
+    "invente o conteúdo que você não está vendo."
+  )
+}
+
 export function formatArtifactsSystemBlock(
   artifacts: ArtifactWire[],
 ): string | null {

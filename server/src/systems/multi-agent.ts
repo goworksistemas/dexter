@@ -90,6 +90,8 @@ export interface SubAgentRunParams {
   connectors?: ConnectorRuntime
   userId: string
   email: string
+  /** Projeto do chat pai — o sub-agente lê os mesmos arquivos. */
+  projectId?: string
   apiKey?: string
   signal?: AbortSignal
   onProgress?: (evt: AgentProgressEvent) => void
@@ -156,6 +158,7 @@ export async function runSubAgent(
       connectors: params.connectors,
       userId: params.userId,
       email: params.email,
+      projectId: params.projectId,
       apiKey: params.apiKey,
       signal: params.signal,
       multiAgentEnabled: false,

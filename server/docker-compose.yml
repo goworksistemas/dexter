@@ -10,10 +10,10 @@
 #   arquivo .env não existir no host de produção, remova/ajuste a chave
 #   `env_file` e configure as variáveis diretamente na stack do Portainer.
 #
-# Redis está previsto aqui para suportar o BullMQ (fila assíncrona — ver
-# AGENTCORE_SPEC.md, seção "Fila assíncrona"). Ainda não é consumido pelo
-# código do runtime (não há REDIS_URL em src/config.ts); o serviço já fica
-# disponível na rede da stack para quando essa etapa for implementada.
+# Redis alimenta a fila BullMQ (sumarização do histórico, embeddings do RAG e
+# execução dos workflows agendados) e o rate limit por usuário do /api/chat.
+# É OPCIONAL: sem REDIS_URL o AgentCore roda tudo in-process — a fila é upgrade
+# (retry, multi-réplica), não dependência.
 
 services:
   agentcore:
@@ -28,8 +28,8 @@ services:
     env_file:
       - .env
     environment:
-      # Uso futuro do BullMQ (ver comentário acima). Sobrescreva/injete via
-      # Infisical/Portainer em produção junto com as demais variáveis.
+      # Fila BullMQ + rate limit por usuário (ver comentário acima).
+      # Sobrescreva/injete via Infisical/Portainer em produção.
       REDIS_URL: redis://redis:6379
     depends_on:
       redis:

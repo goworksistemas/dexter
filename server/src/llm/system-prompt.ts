@@ -5,6 +5,27 @@
 
 export const SYSTEM_PROMPT_VERSION = "2026-08-04.7"
 
+/**
+ * System prompt dividido para o prompt caching da Anthropic: o bloco estático
+ * (mesmo texto em todo request do usuário) vira um breakpoint de cache; o
+ * dinâmico (acesso, projeto, artefatos, conectores) fica fora do cache porque
+ * muda a cada conversa/turno.
+ */
+export interface SystemPromptParts {
+  staticBlock: string
+  dynamicBlock?: string
+}
+
+/** Texto único do prompt — para providers sem cache (OpenAI-compat, Ollama). */
+export function flattenSystemPrompt(
+  prompt: string | SystemPromptParts,
+): string {
+  if (typeof prompt === "string") return prompt
+  return prompt.dynamicBlock
+    ? `${prompt.staticBlock}\n\n${prompt.dynamicBlock}`
+    : prompt.staticBlock
+}
+
 /** Anexado ao prompt quando o usuário habilitou multi-agentes nas preferências. */
 export const MULTI_AGENT_PROMPT_BLOCK = `# 12. Multi-agentes (HABILITADO por você)
 - Tool \`dexter__spawn_subagent\`: delega uma subtarefa independente a um sub-agente

@@ -15,7 +15,7 @@ export function normalizeEmail(email: string): string {
 
 export function emailDomainOf(email: string): string | null {
   const n = normalizeEmail(email)
-  const at = n.lastIndexOf("@")
+  const at = n.indexOf("@")
   if (at <= 0 || at === n.length - 1) return null
   if (n.includes("@", at + 1)) return null
   return n.slice(at + 1)

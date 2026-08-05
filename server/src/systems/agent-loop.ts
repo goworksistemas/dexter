@@ -17,15 +17,27 @@
  *   pedindo conclusão com o que já coletou (não some sem texto).
  * - Timeouts por chamada e por run inteiro.
  * - Tool results grandes são truncados antes de voltar ao modelo.
+ *
+ * As funções puras do loop (truncamento, emenda da continuação, anti-loop)
+ * vivem em `agent-loop-helpers.ts` — é o que os testes cobrem.
  */
 import type Anthropic from "@anthropic-ai/sdk"
 
 import { config } from "../config.js"
-import { getAnthropicClient } from "../lib/anthropic.js"
+import { getAnthropicClient, toAnthropicSystemBlocks } from "../lib/anthropic.js"
 import { erroSanitizado } from "../lib/erro-modelo.js"
 import { responseMaxTokens } from "../llm/models.js"
+import type { GuardaOrcamento } from "../services/run-budget.js"
+import type { SystemPromptParts } from "../llm/system-prompt.js"
 import type { ConnectorRuntime } from "../connectors/types.js"
 import { buildTools, describeTool, executeTool, type AnthropicTool } from "./tools.js"
+import {
+  emendarContinuacao,
+  isToolResultVazio,
+  respostaIncompleta,
+  toolCallFingerprint,
+  truncarToolResultContent,
+} from "./agent-loop-helpers.js"
 import {
   isMultiAgentToolName,
   MULTI_AGENT_MAX_SPAWNS_PER_RUN,
@@ -56,16 +68,21 @@ export type AgentLoopEndReason =
   | "api_error"
   | "aborted"
   | "empty"
+  /** Orçamento mensal do usuário estourou no meio do run (item 4.4). */
+  | "budget"
 
 export interface AgentLoopOptions {
   model: string
-  systemPrompt: string
+  /** String (sem cache) ou blocos estático/dinâmico (com prompt caching). */
+  systemPrompt: string | SystemPromptParts
   messages: Anthropic.MessageParam[]
   access: SystemAccess[]
   /** Conectores Notion/Outlook ativos para este usuário. */
   connectors?: ConnectorRuntime
   userId: string
   email: string
+  /** Projeto do chat — habilita/roteia a tool project__read_file. */
+  projectId?: string
   signal?: AbortSignal
   /** chamado a cada delta de texto (para o SSE). */
   onTextDelta: (text: string) => void
@@ -81,12 +98,25 @@ export interface AgentLoopOptions {
   apiKey?: string
   /** Usuário autorizou multi-agentes (opt-in). */
   multiAgentEnabled?: boolean
+  /**
+   * Guarda do orçamento mensal (services/run-budget.ts). Consultada a cada
+   * `aCadaSteps` tool calls; ausente = usuário sem teto configurado.
+   */
+  budgetGuard?: GuardaOrcamento
 }
 
 export interface AgentLoopResult {
   model: string
+  /** Tokens de entrada NÃO cacheados (o que a Anthropic cobra a preço cheio). */
   inputTokens: number
   outputTokens: number
+  /**
+   * Tokens gravados no cache de prompt (1,25× o preço de input) e lidos dele
+   * (0,10×). Só a Anthropic tem prompt caching — nos demais providers ficam
+   * indefinidos e o custo cai no cálculo simples input/output.
+   */
+  cacheWriteTokens?: number
+  cacheReadTokens?: number
   /** Por que o loop encerrou — para log (sem payload sensível). */
   endReason: AgentLoopEndReason
   /** Quantas tools foram executadas neste run. */
@@ -114,166 +144,23 @@ const PROMPT_FINAL_FORCADO =
   "NÃO chame mais tools. NÃO invente o que não veio nas tools. " +
   "Se faltar dado crítico, diga exatamente o que falta e o que já apurou."
 
+const PROMPT_FINAL_ORCAMENTO =
+  "O orçamento mensal de uso deste usuário foi atingido durante esta resposta. " +
+  "NÃO chame mais tools. Com o que já coletou acima, escreva AGORA a resposta " +
+  "final em português, completa até onde os dados permitem, e deixe explícito " +
+  "o que ficou sem apurar. NÃO invente o que não veio nas tools."
+
+/** Aviso determinístico — não depende de o modelo lembrar de mencionar. */
+const AVISO_ORCAMENTO =
+  "\n\n_Orçamento mensal de uso atingido: encerrei esta resposta com o que já " +
+  "havia consultado. Fale com um administrador para ampliar o limite._"
+
 const PROMPT_FECHAR_RESPOSTA =
   "Você narrou intenção ou parou sem fechar. " +
   "Com o que as tools acima já retornaram, escreva AGORA a resposta final COMPLETA " +
   "e DETALHADA em português (fatos + escopo + conclusão acionável). " +
   "NÃO chame mais tools. NÃO invente. Não repita preâmbulos " +
   "('deixa eu puxar' / 'vou buscar' / 'um momento')."
-
-/** Texto que parece intenção/preâmbulo sem conclusão — comum após tools. */
-function respostaIncompleta(texto: string, teveTools: boolean): boolean {
-  if (!teveTools) return false
-  const t = texto.trim()
-  if (!t) return true
-  const narracao =
-    /^(deixa eu|vou (puxar|buscar|consultar|verificar|olhar|checar)|um momento|aguarde|já (volto|pego)|ok[,!]?\s*(vou|deixa))/i.test(
-      t,
-    ) ||
-    /(deixa eu puxar|números certos|vou (consultar|buscar|puxar|verificar)|já busco|em seguida (vou|busco)|agora (vou|busco))/i.test(
-      t,
-    )
-  if (narracao && t.length < 700) return true
-  if (/(\.{3}|…)\s*$/.test(t) && t.length < 280 && !/\b\d+\b/.test(t)) {
-    return true
-  }
-  // Narrativa de progresso entre tools sem dossiê/tabela/números densos.
-  if (
-    teveTools &&
-    t.length < 400 &&
-    /^(encontrei|pronto|aqui está|vou |agora )/i.test(t) &&
-    !/\|.+\|/.test(t) &&
-    (t.match(/\b\d+\b/g)?.length ?? 0) < 2
-  ) {
-    return true
-  }
-  return false
-}
-
-/** Há um bloco ``` aberto e não fechado no texto já emitido? */
-function fenceAberto(texto: string): boolean {
-  const fences = texto.match(/^```/gm)
-  return (fences?.length ?? 0) % 2 === 1
-}
-
-/** Remove repetição do fim do texto anterior no começo da continuação. */
-function removerSobreposicao(cabecalho: string, anterior: string): string {
-  const max = Math.min(400, anterior.length, cabecalho.length)
-  for (let n = max; n >= 24; n--) {
-    if (cabecalho.startsWith(anterior.slice(anterior.length - n))) {
-      return cabecalho.slice(n)
-    }
-  }
-  return cabecalho
-}
-
-/**
- * Limpa o início da continuação para emendar sem costura visível: tira
- * preâmbulo ("Continuando:"), fence reaberto e trecho repetido. A quebra de
- * linha inicial só é removida se o texto anterior já terminava em linha nova —
- * senão ela é justamente o que faltava para fechar a linha cortada.
- */
-function emendarContinuacao(cabecalho: string, anterior: string): string {
-  let out = cabecalho
-  if (anterior.endsWith("\n")) out = out.replace(/^[\r\n\t ]+/, "")
-  out = out.replace(
-    /^(?:continuando|continuação|continuo|seguindo|segue)\b[^\n]{0,60}\r?\n+/i,
-    "",
-  )
-  if (fenceAberto(anterior)) out = out.replace(/^```[\w-]*[ \t]*\r?\n/, "")
-  return removerSobreposicao(out, anterior)
-}
-
-/** Fingerprint estável de tool+args para anti-loop. */
-function toolCallFingerprint(name: string, input: unknown): string {
-  try {
-    return `${name}::${JSON.stringify(input ?? {})}`
-  } catch {
-    return `${name}::?`
-  }
-}
-
-/** Resultado sem conteúdo útil (modelo refetcha em loop). */
-function isToolResultVazio(result: unknown): boolean {
-  if (result === null || result === undefined) return true
-  if (typeof result === "string") return result.trim().length < 8
-  if (Array.isArray(result)) return result.length === 0
-  if (typeof result === "object") {
-    const keys = Object.keys(result as object)
-    if (keys.length === 0) return true
-    // MCP cru sem texto útil
-    const r = result as { content?: unknown; structuredContent?: unknown }
-    if (
-      "content" in r &&
-      Array.isArray(r.content) &&
-      r.content.length === 0 &&
-      r.structuredContent == null
-    ) {
-      return true
-    }
-  }
-  return false
-}
-
-/** Trunca tool_result grande para não estourar a janela de contexto.
- *  Preserva totais agregados (GoDash) quando existirem.
- *  NUNCA colapsa JSON genérico (ex.: Notion MCP) em `{}` — isso apagava
- *  schema/markdown de notion-fetch e fazia o agent loop refetchar sem progresso. */
-function truncarToolResultContent(content: string, maxChars: number): string {
-  if (content.length <= maxChars) return content
-
-  const rodape = (omitidos: number) =>
-    `\n\n[…resultado truncado (${omitidos} chars omitidos); use o trecho acima — não refetch o mesmo id]`
-
-  try {
-    const parsed = JSON.parse(content) as unknown
-
-    // Texto Notion (markdown/schema) chega como JSON string.
-    if (typeof parsed === "string") {
-      const budget = Math.max(500, maxChars - 120)
-      if (parsed.length <= budget) return content
-      return JSON.stringify(parsed.slice(0, budget) + rodape(parsed.length - budget))
-    }
-
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const obj = parsed as Record<string, unknown>
-      const aggregateKeys = [
-        "total_encontrado",
-        "total_retornado",
-        "total",
-        "count",
-        "aviso",
-        "erro",
-        "filtros",
-        "limite_aplicado",
-      ] as const
-      const hasAggregate = aggregateKeys.some((k) => k in obj)
-
-      // Só o caminho GoDash (listas com total_*): preserva agregados.
-      if (hasAggregate) {
-        const preserved: Record<string, unknown> = {}
-        for (const key of aggregateKeys) {
-          if (key in obj) preserved[key] = obj[key]
-        }
-        const linhas = obj.linhas ?? obj.itens
-        if (Array.isArray(linhas) && linhas.length <= 5) {
-          preserved[Array.isArray(obj.linhas) ? "linhas" : "itens"] = linhas
-        }
-        const header = JSON.stringify(preserved, null, 2)
-        if (header.length < maxChars) {
-          return (
-            header +
-            "\n\n[…lista/demais campos truncados; use total_encontrado/total_retornado/count acima como total autoritativo]"
-          )
-        }
-      }
-    }
-  } catch {
-    /* não-JSON */
-  }
-
-  return content.slice(0, maxChars) + rodape(content.length - maxChars)
-}
 
 function mensagemApiError(err: unknown): string {
   if (!(err instanceof Error)) return "Erro desconhecido na API do modelo."
@@ -311,6 +198,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     access: opts.access,
     connectors: opts.connectors,
     userId: opts.userId,
+    projectId: opts.projectId,
     multiAgentEnabled: opts.multiAgentEnabled,
   })
   // Tool server-side da Anthropic: a busca roda na API deles (com citações),
@@ -323,6 +211,17 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       max_uses: config.WEB_SEARCH_MAX_USES,
     })
   }
+  // Breakpoint de cache no ÚLTIMO item: cacheia TODAS as definições de tools
+  // (elas abrem o prompt e são idênticas entre turnos do mesmo usuário). Cópia
+  // rasa porque o objeto pode vir de um cache de tools de conector.
+  const ultimaTool = apiTools[apiTools.length - 1]
+  if (ultimaTool && typeof ultimaTool === "object") {
+    apiTools[apiTools.length - 1] = {
+      ...(ultimaTool as Record<string, unknown>),
+      cache_control: { type: "ephemeral" },
+    }
+  }
+  const systemBlocks = toAnthropicSystemBlocks(opts.systemPrompt)
   const messages: Anthropic.MessageParam[] = [...opts.messages]
   const maxRounds = opts.maxRounds ?? config.AGENT_MAX_ROUNDS
   const maxSteps = opts.maxSteps ?? config.AGENT_MAX_STEPS
@@ -334,6 +233,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
   let inputTokens = 0
   let outputTokens = 0
+  let cacheWriteTokens = 0
+  let cacheReadTokens = 0
   let lastModel = opts.model
   let step = 0
   let ultimoStatus = ""
@@ -343,6 +244,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   /** Conta falhas/vazios da mesma tool+args — corta loop Notion refetch. */
   const toolFailCounts = new Map<string, number>()
   let spawnCount = 0
+  /** Orçamento mensal estourou no meio deste run (item 4.4). */
+  let orcamentoEstourado = false
 
   const progress = (evt: AgentProgressEvent): void => opts.onProgress?.(evt)
   const status = (text: string): void => {
@@ -397,7 +300,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         {
           model: opts.model,
           max_tokens: maxTokens,
-          system: opts.systemPrompt,
+          system: systemBlocks,
           messages,
           ...(params.allowTools && apiTools.length > 0
             ? { tools: apiTools as Anthropic.Messages.ToolUnion[] }
@@ -480,7 +383,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         throw erroSanitizado(mensagemApiError(err))
       }
 
+      // Com prompt caching, `input_tokens` conta SÓ o que não veio do cache.
+      // Os três contadores ficam SEPARADOS porque cada um tem preço diferente
+      // (write 1,25× · read 0,10× do input) — somar tudo em inputTokens
+      // inflava o custo do cache read em 10×. A ponderação é feita em
+      // services/model-pricing.ts.
       inputTokens += final.usage.input_tokens
+      cacheWriteTokens += final.usage.cache_creation_input_tokens ?? 0
+      cacheReadTokens += final.usage.cache_read_input_tokens ?? 0
       outputTokens += final.usage.output_tokens
       lastModel = final.model
 
@@ -499,16 +409,21 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     return final
   }
 
-  async function sintetizarFinal(motivo: "max_steps" | "timeout"): Promise<void> {
+  async function sintetizarFinal(
+    motivo: "max_steps" | "timeout" | "budget",
+  ): Promise<void> {
     status(
       motivo === "timeout"
         ? "Fechando a resposta (tempo esgotado)"
-        : "Consolidando o que já coletei",
+        : motivo === "budget"
+          ? "Fechando a resposta (orçamento mensal atingido)"
+          : "Consolidando o que já coletei",
     )
     try {
       await streamTurn({
         allowTools: false,
-        extraUser: PROMPT_FINAL_FORCADO,
+        extraUser:
+          motivo === "budget" ? PROMPT_FINAL_ORCAMENTO : PROMPT_FINAL_FORCADO,
       })
       endReason = motivo
     } catch (err) {
@@ -634,6 +549,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
               access: opts.access,
               connectors: opts.connectors,
               signal: opts.signal,
+              projectId: opts.projectId,
               multiAgentEnabled: opts.multiAgentEnabled,
               model: opts.model,
               apiKey: opts.apiKey,
@@ -693,20 +609,40 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
           content: truncarToolResultContent(raw, toolResultMax),
           is_error: !exec.ok,
         })
+
+        // Orçamento mensal: a cada N tool calls, custo acumulado do run × o que
+        // resta do teto do mês. Estourou → para de consultar e vai fechar.
+        if (opts.budgetGuard && step % opts.budgetGuard.aCadaSteps === 0) {
+          orcamentoEstourado = await opts.budgetGuard.estourou({
+            inputTokens,
+            outputTokens,
+            cacheWriteTokens,
+            cacheReadTokens,
+          })
+          if (orcamentoEstourado) break
+        }
       }
 
-      // Tools pedidas mas não executadas (bateu maxSteps no meio do lote).
+      // Tools pedidas mas não executadas (bateu maxSteps ou o orçamento no
+      // meio do lote) — a API exige um tool_result para cada tool_use.
       for (const tu of toolUses.slice(toolResults.length)) {
         toolResults.push({
           type: "tool_result",
           tool_use_id: tu.id,
-          content:
-            "Limite de consultas desta resposta atingido — esta tool não foi executada.",
+          content: orcamentoEstourado
+            ? "Orçamento mensal de uso atingido — esta tool não foi executada."
+            : "Limite de consultas desta resposta atingido — esta tool não foi executada.",
           is_error: true,
         })
       }
 
       messages.push({ role: "user", content: toolResults })
+
+      if (orcamentoEstourado) {
+        await sintetizarFinal("budget")
+        emitirTexto(AVISO_ORCAMENTO)
+        break
+      }
 
       // Última rodada ou teto de steps → síntese obrigatória sem tools.
       if (step >= maxSteps || round >= maxRounds - 1) {
@@ -747,6 +683,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       api_error:
         "Não obtive texto do modelo nesta rodada. Toque em **Tentar novamente**.",
       aborted: "Geração cancelada.",
+      budget:
+        "Orçamento mensal de uso atingido e não consegui redigir o texto final. Fale com um administrador para ampliar o limite.",
       empty:
         "Não obtive texto do modelo nesta rodada. Toque em **Tentar novamente**.",
       ok: "Não obtive texto do modelo nesta rodada. Toque em **Tentar novamente**.",
@@ -759,6 +697,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     model: lastModel,
     inputTokens,
     outputTokens,
+    cacheWriteTokens,
+    cacheReadTokens,
     endReason,
     steps: step,
   }

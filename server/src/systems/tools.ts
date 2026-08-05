@@ -29,6 +29,10 @@ import {
 } from "./web-search.js"
 import { KB_CATEGORIES, searchKbDocs } from "../services/kb-store.js"
 import {
+  PROJECT_FILE_READ_MAX_CHARS,
+  readProjectFileText,
+} from "../services/project-store.js"
+import {
   buildMultiAgentTools,
   describeMultiAgentTool,
   isMultiAgentToolName,
@@ -154,10 +158,112 @@ async function executeKbTool(
   }
 }
 
+/** Arquivos do projeto da conversa — tool só existe se o chat tem projeto. */
+const PROJECT_TOOL_PREFIX = "project__"
+
+function isProjectToolName(name: string): boolean {
+  return name.startsWith(PROJECT_TOOL_PREFIX)
+}
+
+function buildProjectTools(): AnthropicTool[] {
+  return [
+    {
+      name: "project__read_file",
+      description:
+        "[Projeto] Lê o conteúdo de um arquivo de texto anexado ao projeto desta conversa. " +
+        "O system prompt traz só o ÍNDICE dos arquivos (nome, tipo, tamanho, file_id) — " +
+        "o conteúdo só chega por aqui. Use SEMPRE que a resposta depender do que está " +
+        "dentro de um arquivo do projeto, antes de responder. " +
+        `Devolve no máximo ${PROJECT_FILE_READ_MAX_CHARS} caracteres por leitura ` +
+        "(o corte vem sinalizado no fim do texto). Arquivos binários/PDF não são suportados.",
+      input_schema: {
+        type: "object",
+        properties: {
+          file_id: {
+            type: "string",
+            description:
+              "UUID do arquivo, exatamente como aparece em `file_id:` no índice de arquivos do projeto.",
+          },
+        },
+        required: ["file_id"],
+      },
+    },
+  ]
+}
+
+function describeProjectTool(name: string): ToolDescription {
+  return {
+    slug: "project",
+    fn: name.slice(PROJECT_TOOL_PREFIX.length),
+    systemLabel: "Projeto",
+    toolLabel: "Leitura de arquivo",
+    label: "Lendo arquivo do projeto",
+  }
+}
+
+async function executeProjectTool(
+  name: string,
+  input: Record<string, unknown>,
+  ctx: { userId: string; projectId?: string },
+): Promise<ToolExecution> {
+  const fn = name.slice(PROJECT_TOOL_PREFIX.length)
+  if (fn !== "read_file") {
+    return {
+      ok: false,
+      slug: "project",
+      fn,
+      error: `função de projeto desconhecida: ${fn}`,
+    }
+  }
+  if (!ctx.projectId) {
+    return {
+      ok: false,
+      slug: "project",
+      fn,
+      error:
+        "Esta conversa não está em um projeto — não há arquivos de projeto para ler.",
+    }
+  }
+  const fileId = typeof input.file_id === "string" ? input.file_id.trim() : ""
+  if (!fileId) {
+    return {
+      ok: false,
+      slug: "project",
+      fn,
+      error: "Informe o file_id do arquivo (está no índice de arquivos do projeto).",
+    }
+  }
+
+  try {
+    const arquivo = await readProjectFileText(ctx.projectId, fileId, ctx.userId)
+    const cabecalho = `Arquivo do projeto: ${arquivo.name} (${
+      arquivo.mimeType ?? "tipo desconhecido"
+    }, ${arquivo.sizeBytes} bytes)`
+    const rodape = arquivo.truncated
+      ? `\n\n[…arquivo truncado em ${PROJECT_FILE_READ_MAX_CHARS} chars; o texto acima é o início do arquivo]`
+      : ""
+    return {
+      ok: true,
+      slug: "project",
+      fn,
+      result: `${cabecalho}\n\n${arquivo.content}${rodape}`,
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      slug: "project",
+      fn,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
 export interface BuildToolsOptions {
   access: SystemAccess[]
   connectors?: ConnectorRuntime
   userId?: string
+  /** Projeto do chat — habilita a tool project__read_file. */
+  projectId?: string
   /** Usuário autorizou multi-agentes nas preferências. */
   multiAgentEnabled?: boolean
 }
@@ -199,6 +305,9 @@ export async function buildTools(
   }
   tools.push(...(await buildWebTools()))
   tools.push(...buildKbTools())
+  if (opts.projectId) {
+    tools.push(...buildProjectTools())
+  }
   if (opts.multiAgentEnabled) {
     tools.push(...buildMultiAgentTools())
   }
@@ -224,6 +333,9 @@ export function describeTool(name: string): ToolDescription {
   }
   if (isKbToolName(name)) {
     return describeKbTool(name)
+  }
+  if (isProjectToolName(name)) {
+    return describeProjectTool(name)
   }
   if (isConnectorToolName(name)) {
     return describeConnectorTool(name)
@@ -262,6 +374,8 @@ export async function executeTool(
     connectors?: ConnectorRuntime
     /** Cancelamento do run (cliente desconectou / Parar). */
     signal?: AbortSignal
+    /** Projeto do chat — necessário para project__read_file. */
+    projectId?: string
     multiAgentEnabled?: boolean
     model?: string
     apiKey?: string
@@ -287,6 +401,7 @@ export async function executeTool(
       connectors: ctx.connectors,
       userId: ctx.userId,
       email: ctx.email,
+      projectId: ctx.projectId,
       apiKey: ctx.apiKey,
       signal: ctx.signal,
       onProgress: ctx.onProgress,
@@ -315,6 +430,12 @@ export async function executeTool(
   }
   if (isKbToolName(name)) {
     return executeKbTool(name, input)
+  }
+  if (isProjectToolName(name)) {
+    return executeProjectTool(name, input, {
+      userId: ctx.userId,
+      projectId: ctx.projectId,
+    })
   }
   if (isConnectorToolName(name)) {
     if (!ctx.connectors) {

@@ -21,7 +21,9 @@ import transcribeRoutes from "./routes/transcribe.js"
 import userKeysRoutes from "./routes/user-keys.js"
 import shareRoutes from "./routes/share.js"
 import workflowsRoutes from "./routes/workflows.js"
+import { closeQueues, isQueueEnabled } from "./lib/queue.js"
 import { AuthError, ForbiddenError, NotFoundError } from "./services/auth.js"
+import { startJobWorkers } from "./services/jobs.js"
 import {
   startWorkflowRunner,
   stopWorkflowRunner,
@@ -111,9 +113,11 @@ await app.register(userKeysRoutes)
 await app.register(workflowsRoutes)
 await app.register(adminRoutes)
 
-// Agendador dos workflows: para o timer junto com o servidor (SIGINT/SIGTERM).
+// Agendador dos workflows e workers da fila param junto com o servidor
+// (SIGINT/SIGTERM) — sem isso o processo não encerra com o BullMQ ligado.
 app.addHook("onClose", async () => {
   stopWorkflowRunner()
+  await closeQueues()
 })
 
 async function start(): Promise<void> {
@@ -123,6 +127,17 @@ async function start(): Promise<void> {
       await app.listen({ port: config.PORT, host: config.HOST })
       for (const line of connectorsBootSummary()) {
         app.log.info(`[connectors] ${line}`)
+      }
+      // Fila (item 2.1): com REDIS_URL, os workers deste processo consomem
+      // sumarização, embeddings e execução de workflows. Sem Redis tudo segue
+      // in-process — a fila é upgrade, não dependência.
+      if (isQueueEnabled()) {
+        startJobWorkers(app.log)
+        app.log.info("[queue] workers da fila iniciados (BullMQ + Redis)")
+      } else {
+        app.log.info(
+          "[queue] sem REDIS_URL — jobs executam in-process (modo dev/single-node)",
+        )
       }
       // Sem service role não há como executar workflow (escrita bypassa RLS).
       if (config.SUPABASE_SERVICE_ROLE_KEY) {

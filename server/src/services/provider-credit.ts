@@ -2,6 +2,7 @@
  * Crédito de providers (corporativo + BYOK) e orçamento mensal por usuário.
  */
 import { KEY_PROVIDERS, type KeyProvider } from "./llm-keys.js"
+import { gastoDoMesUsd } from "./run-budget.js"
 import { supabase } from "../lib/supabase.js"
 import type { ModelProvider } from "./model-store.js"
 import type { ModelKeySource } from "../llm/model-catalog-meta.js"
@@ -72,35 +73,6 @@ export async function recordQuotaError(
   }
 }
 
-function monthStartUtc(): string {
-  const d = new Date()
-  d.setUTCDate(1)
-  d.setUTCHours(0, 0, 0, 0)
-  return d.toISOString()
-}
-
-async function userMonthSpendUsd(userId: string): Promise<number> {
-  const since = monthStartUtc()
-  const { data: chats } = await supabase
-    .from("agent_chats")
-    .select("id")
-    .eq("user_id", userId)
-  const chatIds = (chats ?? []).map((c) => String(c.id))
-  if (chatIds.length === 0) return 0
-
-  const { data: rows, error } = await supabase
-    .from("agent_messages")
-    .select("cost_usd")
-    .in("chat_id", chatIds)
-    .gte("created_at", since)
-  if (error) return 0
-  let sum = 0
-  for (const row of rows ?? []) {
-    sum += Number(row.cost_usd ?? 0)
-  }
-  return sum
-}
-
 export interface ModelCreditContext {
   userId: string
   personalProviders: ReadonlySet<KeyProvider>
@@ -125,7 +97,8 @@ export async function buildModelCreditContext(
       .select("usage_budget_usd")
       .eq("id", userId)
       .maybeSingle(),
-    userMonthSpendUsd(userId),
+    // Mesmo gasto que a guarda de orçamento do agent loop usa (cache de 30s).
+    gastoDoMesUsd(userId),
     supabase
       .from("dexter_user_provider_credit")
       .select("provider, credit_status")

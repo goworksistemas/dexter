@@ -63,6 +63,12 @@ const SELECT_COLS =
 const PROMPT_CACHE_TTL_MS = 60_000
 /** Teto por doc devolvido na busca (o modelo não precisa de 60k chars de uma vez). */
 const SEARCH_CONTENT_CAP = 8_000
+/**
+ * Teto por doc `always_load` no system prompt. Esses docs entram em TODA
+ * mensagem de TODA conversa — um doc de 20k chars custa isso a cada turno.
+ * Acima do teto o conteúdo entra truncado e o modelo lê o resto com kb__buscar.
+ */
+const ALWAYS_LOAD_CONTENT_CAP = 2_000
 /** Máx. de documentos completos por busca. */
 const SEARCH_MAX_DOCS = 5
 
@@ -155,10 +161,22 @@ export interface KbIndexEntry {
 }
 
 export interface KbPromptContext {
-  /** enabled && always_load, na ordem de `sort` — vão inteiros no system prompt. */
+  /** enabled && always_load, na ordem de `sort` — conteúdo capado em
+   * ALWAYS_LOAD_CONTENT_CAP antes de ir ao system prompt. */
   alwaysDocs: KbDoc[]
   /** enabled && !always_load — só o índice; o conteúdo sai via kb__buscar. */
   index: KbIndexEntry[]
+}
+
+/** Corta o doc `always_load` no teto, apontando o caminho para o texto completo. */
+function capAlwaysLoadDoc(doc: KbDoc): KbDoc {
+  if (doc.content.length <= ALWAYS_LOAD_CONTENT_CAP) return doc
+  return {
+    ...doc,
+    content:
+      doc.content.slice(0, ALWAYS_LOAD_CONTENT_CAP) +
+      `\n\n[…doc truncado; leia completo com kb__buscar slug=${doc.slug}]`,
+  }
 }
 
 let promptCache: { at: number; ctx: KbPromptContext } | null = null
@@ -183,7 +201,7 @@ export async function getKbPromptContext(): Promise<KbPromptContext> {
 
   const rows = (data ?? []).map((r) => normalize(r as Record<string, unknown>))
   const ctx: KbPromptContext = {
-    alwaysDocs: rows.filter((d) => d.always_load),
+    alwaysDocs: rows.filter((d) => d.always_load).map(capAlwaysLoadDoc),
     index: rows
       .filter((d) => !d.always_load)
       .map((d) => ({ slug: d.slug, title: d.title, category: d.category })),
