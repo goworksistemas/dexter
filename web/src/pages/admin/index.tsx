@@ -16,6 +16,7 @@ import {
   Cpu,
   MessagesSquare,
   X,
+  Zap,
 } from "lucide-react"
 
 import { PageHeading, PageShell } from "@/components/layout/page-shell"
@@ -45,7 +46,7 @@ import { formatRelative } from "@/lib/dates"
 import { useAuth } from "@/providers/auth-provider"
 import type { DexterRole } from "@/types"
 import { cn } from "@/lib/utils"
-import { fmtUsd } from "@/lib/format/money"
+import { formatBRLWithUsd, useUsdBrlRate } from "@/lib/models"
 import { AdminModelsPanel } from "./models-panel"
 import { AdminKbPanel } from "./kb-panel"
 import { AdminCostCenterPanel, COST_CENTER_PERIODS } from "./cost-center-panel"
@@ -93,6 +94,38 @@ function fmtCompact(n: number | null | undefined): string {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(Number(n ?? 0))
+}
+
+function fmtPct(n: number | null | undefined): string {
+  if (n == null) return "—"
+  return new Intl.NumberFormat("pt-BR", {
+    style: "percent",
+    maximumFractionDigits: 1,
+  }).format(n)
+}
+
+/**
+ * Agregados de prompt caching (Anthropic) que o AgentCore mescla no payload do
+ * overview. Ficam tipados aqui porque vêm de fora da RPC `dexter_admin_overview`.
+ */
+interface CacheAggregates {
+  messages: number
+  tokens_in: number
+  tokens_cache_write: number
+  tokens_cache_read: number
+  /** cache_read / (input + cache_read) — null sem base de cálculo. */
+  cache_hit_rate: number | null
+  /** Varredura bateu o teto de linhas: os números são piso, não total. */
+  truncated: boolean
+}
+
+function cacheAggregatesOf(
+  overview: AdminOverview | null,
+): CacheAggregates | null {
+  const comCache = overview as
+    | (AdminOverview & { cache?: CacheAggregates | null })
+    | null
+  return comCache?.cache ?? null
 }
 
 function shortDay(iso: string): string {
@@ -179,6 +212,7 @@ function UsageChart({
 }
 
 function ModelTable({ rows }: { rows: AdminModelStat[] }) {
+  const usdBrlRate = useUsdBrlRate()
   if (!rows.length) {
     return (
       <p className="py-6 text-center text-sm text-muted-foreground">
@@ -198,7 +232,9 @@ function ModelTable({ rows }: { rows: AdminModelStat[] }) {
               <span className="min-w-0 truncate font-medium">{r.model}</span>
               <span className="shrink-0 tabular-nums text-muted-foreground">
                 {fmtCompact(tokens)} tok · {fmtNum(r.messages)} msgs
-                {Number(r.cost_usd) > 0 ? ` · ${fmtUsd(r.cost_usd)}` : ""}
+                {Number(r.cost_usd) > 0
+                  ? ` · ${formatBRLWithUsd(r.cost_usd, usdBrlRate)}`
+                  : ""}
               </span>
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-muted">
@@ -219,6 +255,7 @@ function ModelTable({ rows }: { rows: AdminModelStat[] }) {
 
 export function AdminPage() {
   const { user, isLoading: authLoading } = useAuth()
+  const usdBrlRate = useUsdBrlRate()
   const [adminTab, setAdminTab] = React.useState<
     "analytics" | "custos" | "models" | "kb" | "users"
   >("analytics")
@@ -391,6 +428,7 @@ export function AdminPage() {
   }
 
   const t = overview?.totals
+  const cache = cacheAggregatesOf(overview)
 
   return (
     <PageShell className="max-w-7xl">
@@ -488,7 +526,7 @@ export function AdminPage() {
         </div>
       ) : (
         <div className={cn(overviewLoading && "opacity-60 transition-opacity")}>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
             <Kpi
               label="Usuários ativos"
               value={fmtNum(t?.users_active)}
@@ -510,8 +548,18 @@ export function AdminPage() {
             <Kpi
               label="Tokens"
               value={fmtCompact(t?.tokens_period)}
-              hint={`in ${fmtCompact(t?.tokens_in_period)} · out ${fmtCompact(t?.tokens_out_period)}${Number(t?.cost_usd_period) > 0 ? ` · ${fmtUsd(t?.cost_usd_period)}` : ""}`}
+              hint={`in ${fmtCompact(t?.tokens_in_period)} · out ${fmtCompact(t?.tokens_out_period)}${Number(t?.cost_usd_period) > 0 ? ` · ${formatBRLWithUsd(t?.cost_usd_period, usdBrlRate)}` : ""}`}
               icon={Coins}
+            />
+            <Kpi
+              label="Cache de prompt"
+              value={fmtPct(cache?.cache_hit_rate)}
+              hint={
+                cache && cache.messages > 0
+                  ? `read ${fmtCompact(cache.tokens_cache_read)} · write ${fmtCompact(cache.tokens_cache_write)}${cache.truncated ? " · amostra parcial" : ""}`
+                  : "sem mensagens com caching no período"
+              }
+              icon={Zap}
             />
           </div>
 
@@ -592,7 +640,9 @@ export function AdminPage() {
                     <p>{fmtCompact(u.tokens)} tok</p>
                     <p>
                       {fmtNum(u.chats)} chats · {fmtNum(u.messages)} msgs
-                      {Number(u.cost_usd) > 0 ? ` · ${fmtUsd(u.cost_usd)}` : ""}
+                      {Number(u.cost_usd) > 0
+                        ? ` · ${formatBRLWithUsd(u.cost_usd, usdBrlRate)}`
+                        : ""}
                     </p>
                   </div>
                 </button>
@@ -786,7 +836,7 @@ export function AdminPage() {
                   <Kpi
                     label="Tokens período"
                     value={fmtCompact(detail.totals.tokens_period)}
-                    hint={`in ${fmtCompact(detail.totals.tokens_in_period)} · out ${fmtCompact(detail.totals.tokens_out_period)}${Number(detail.totals.cost_usd_period) > 0 ? ` · ${fmtUsd(detail.totals.cost_usd_period)}` : ""}`}
+                    hint={`in ${fmtCompact(detail.totals.tokens_in_period)} · out ${fmtCompact(detail.totals.tokens_out_period)}${Number(detail.totals.cost_usd_period) > 0 ? ` · ${formatBRLWithUsd(detail.totals.cost_usd_period, usdBrlRate)}` : ""}`}
                     icon={Coins}
                   />
                   <Kpi
@@ -855,7 +905,10 @@ export function AdminPage() {
                                 </td>
                                 <td className="px-3 py-2 tabular-nums text-muted-foreground">
                                   {Number(c.cost_usd_period) > 0
-                                    ? fmtUsd(c.cost_usd_period)
+                                    ? formatBRLWithUsd(
+                                        c.cost_usd_period,
+                                        usdBrlRate,
+                                      )
                                     : "—"}
                                 </td>
                                 <td className="max-w-[120px] truncate px-3 py-2 text-xs text-muted-foreground">

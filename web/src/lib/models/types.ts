@@ -45,6 +45,8 @@ export interface ModelInfo {
 export interface ModelsResponse {
   default: string
   models: ModelInfo[]
+  /** Cotação USD→BRL do dia (server: `services/exchange-rate.ts`). */
+  usdBrlRate?: number
 }
 
 export function modelCaps(m?: ModelInfo | null): ModelCapabilities {

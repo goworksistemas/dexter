@@ -53,7 +53,11 @@ export interface ChatRunSnapshot {
 
 export interface StartChatRunParams {
   chatId: string
-  /** Histórico completo já incluindo a última mensagem do usuário. */
+  /**
+   * Histórico local já incluindo a mensagem nova do usuário. Serve para o
+   * snapshot otimista da UI; no fio vai só a última mensagem do usuário —
+   * o AgentCore monta o contexto a partir do banco.
+   */
   messages: ChatMessage[]
   model?: string | null
   projectId?: string | null
@@ -408,21 +412,25 @@ export class ChatRunsStore {
     const { signal } = controller
     let texto = ""
 
-    // Mensagens limpas — sem apêndice legado. Artefatos vão só em context.
-    const chatMessages: ChatMessage[] = params.messages.map((m) => ({
-      ...m,
-      content: stripArtifactAppendix(m.content),
-    }))
-    if (params.attachments && params.attachments.length > 0) {
-      for (let i = chatMessages.length - 1; i >= 0; i--) {
-        if (chatMessages[i]!.role === "user") {
-          chatMessages[i] = {
-            ...chatMessages[i]!,
-            attachments: params.attachments,
-          }
-          break
-        }
-      }
+    // No fio vai SÓ a mensagem nova (o histórico o AgentCore lê do banco).
+    // Sem apêndice legado de artefatos — eles vão só em `context`.
+    const ultimaDoUsuario = [...params.messages]
+      .reverse()
+      .find((m) => m.role === "user")
+    if (!ultimaDoUsuario) {
+      this.settle(chatId, assistantMessageId, {
+        assistantText: "",
+        status: "error",
+        error: "Nenhuma mensagem do usuário para enviar.",
+      })
+      return
+    }
+    const mensagemNova: ChatMessage = {
+      ...ultimaDoUsuario,
+      content: stripArtifactAppendix(ultimaDoUsuario.content),
+      ...(params.attachments && params.attachments.length > 0
+        ? { attachments: params.attachments }
+        : {}),
     }
 
     const context =
@@ -438,7 +446,7 @@ export class ChatRunsStore {
 
     try {
       for await (const chunk of this.transport.stream(
-        { threadId: chatId, messages: chatMessages, context },
+        { threadId: chatId, message: mensagemNova, context },
         signal,
       )) {
         // Abandonar o loop sem abortar deixaria o fetch/SSE aberto no servidor.

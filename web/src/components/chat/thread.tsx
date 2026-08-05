@@ -19,6 +19,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -46,11 +47,16 @@ import { toast } from "sonner"
 import { ARTIFACT_SPLIT_QUERY } from "@/components/artifacts/artifact-panel"
 import { AgentActivity } from "@/components/chat/agent-progress"
 import { ComposerPlusMenu } from "@/components/chat/composer-plus-menu"
+import { CostEstimateHint } from "@/components/chat/cost-estimate-hint"
 import { MessageCostInfo } from "@/components/chat/cost-info"
 import { ImageGenPlaceholder } from "@/components/chat/image-gen-placeholder"
 import { Markdown } from "@/components/chat/markdown"
 import { ModelSelector } from "@/components/chat/model-selector"
-import { modelCaps, useModels } from "@/lib/models"
+import {
+  modelCaps,
+  useModels,
+  type MensagemHistorico,
+} from "@/lib/models"
 import { useChatModel } from "@/lib/chats/use-chat-model"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
@@ -387,6 +393,23 @@ export function Thread({
     capsSelected.imageGeneration &&
     /image|imagen|dall-e|gpt-image/i.test(selectedModel?.id ?? "")
 
+  /**
+   * Histórico no formato da estimativa de custo do composer. Só as últimas
+   * mensagens interessam (o server reenvia uma janela deslizante), então a
+   * conta não cresce com o tamanho da conversa.
+   */
+  const historicoEstimativa = useMemo<MensagemHistorico[]>(
+    () =>
+      threadState.messages.slice(-12).map((m) => ({
+        texto: textoDaMensagem(m),
+        tokensOut:
+          typeof m.metadata?.custom?.tokens_out === "number"
+            ? m.metadata.custom.tokens_out
+            : null,
+      })),
+    [threadState.messages],
+  )
+
   const composer = (
     <Composer
       runtime={runtime}
@@ -396,6 +419,7 @@ export function Thread({
       // chat já pintado não pode bloquear o envio.
       composerLocked={isLoadingHistory && vazio}
       pendingAttachments={pendingAttachments}
+      historicoEstimativa={historicoEstimativa}
       onStop={onStop}
       centered={mostrarHome}
     />
@@ -1046,6 +1070,8 @@ interface ComposerProps {
   /** Carregando histórico — desabilita envio, sem mostrar botão Parar. */
   composerLocked?: boolean
   pendingAttachments: PendingAttachmentsController
+  /** Últimas mensagens da conversa — base da estimativa de custo. */
+  historicoEstimativa: MensagemHistorico[]
   onStop: () => void
   /** Composer mais generoso no empty state (estilo Claude). */
   centered?: boolean
@@ -1057,6 +1083,7 @@ function Composer({
   isRunning,
   composerLocked = false,
   pendingAttachments,
+  historicoEstimativa,
   onStop,
   centered = false,
 }: ComposerProps) {
@@ -1269,7 +1296,13 @@ function Composer({
           ) : null}
         </div>
 
-        <div className="flex min-w-0 items-center gap-0.5">
+        <div className="flex min-w-0 items-center gap-1">
+          <CostEstimateHint
+            texto={composerState.text}
+            historico={historicoEstimativa}
+            model={selected}
+            className="hidden sm:inline"
+          />
           <ModelSelector />
           {isRunning ? (
             <Button

@@ -6,9 +6,12 @@ import * as React from "react"
 
 import { useAuth } from "@/providers/auth-provider"
 import { fetchModels } from "./api"
+import { FALLBACK_USD_BRL, normalizeRate } from "./currency"
 import type { ModelInfo } from "./types"
 
 const STORAGE_KEY = "dexter-model"
+/** Última cotação conhecida — evita piscar o fallback a cada recarga. */
+const RATE_STORAGE_KEY = "dexter-usd-brl"
 
 interface ModelsContextValue {
   /** Modelos online (available === true). */
@@ -20,6 +23,8 @@ interface ModelsContextValue {
   selectedModelId: string | null
   /** true se a escolha salva caiu (não está mais online). */
   selectedOffline: boolean
+  /** Cotação USD→BRL usada para exibir custos em reais. */
+  usdBrlRate: number
   selectModel: (id: string) => void
   refreshModels: () => void
 }
@@ -29,6 +34,12 @@ const ModelsContext = React.createContext<ModelsContextValue | null>(null)
 function readStoredModelId(): string | null {
   if (typeof window === "undefined") return null
   return window.localStorage.getItem(STORAGE_KEY)
+}
+
+function readStoredRate(): number {
+  if (typeof window === "undefined") return FALLBACK_USD_BRL
+  const raw = window.localStorage.getItem(RATE_STORAGE_KEY)
+  return normalizeRate(raw ? Number.parseFloat(raw) : null)
 }
 
 function resolveSelectedId(online: ModelInfo[], defaultId: string): string | null {
@@ -46,6 +57,7 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = React.useState<string | null>(null)
   const [selectedModelId, setSelectedModelId] = React.useState<string | null>(null)
   const [defaultId, setDefaultId] = React.useState<string>("")
+  const [usdBrlRate, setUsdBrlRate] = React.useState<number>(readStoredRate)
   const abortRef = React.useRef<AbortController | null>(null)
   /** Probe em voo (lento) — o refresh de foco não pode abortá-lo. */
   const probeControllerRef = React.useRef<AbortController | null>(null)
@@ -73,9 +85,13 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
     setError(null)
 
     fetchModels(controller.signal, { probe })
-      .then(({ default: def, models: lista }) => {
+      .then(({ default: def, models: lista, usdBrlRate: cotacao }) => {
         setDefaultId(def)
         setAllModels(lista)
+        if (cotacao != null && Number.isFinite(cotacao) && cotacao > 0) {
+          setUsdBrlRate(cotacao)
+          window.localStorage.setItem(RATE_STORAGE_KEY, String(cotacao))
+        }
         const online = lista.filter((m) => m.available !== false)
         const next = resolveSelectedId(online, def)
         setSelectedModelId(next)
@@ -170,6 +186,7 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
       error,
       selectedModelId,
       selectedOffline,
+      usdBrlRate,
       selectModel,
       refreshModels,
     }),
@@ -180,6 +197,7 @@ export function ModelsProvider({ children }: { children: React.ReactNode }) {
       error,
       selectedModelId,
       selectedOffline,
+      usdBrlRate,
       selectModel,
       refreshModels,
     ],
@@ -196,4 +214,14 @@ export function useModels(): ModelsContextValue {
     throw new Error("useModels deve ser usado dentro de <ModelsProvider>")
   }
   return ctx
+}
+
+/**
+ * Cotação para formatar custos. Componentes de custo aparecem em telas fora do
+ * fluxo do chat (sidebar, admin), então este hook NÃO exige o provider: sem ele
+ * cai na última cotação salva / no fallback.
+ */
+export function useUsdBrlRate(): number {
+  const ctx = React.useContext(ModelsContext)
+  return ctx?.usdBrlRate ?? readStoredRate()
 }

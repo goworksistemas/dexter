@@ -61,9 +61,14 @@ export interface ChatContext {
   [key: string]: unknown;
 }
 
+/**
+ * Só a mensagem NOVA vai no fio: o AgentCore monta o contexto do turno com o
+ * histórico persistido em `agent_messages` (janela deslizante do lado dele).
+ * Reenviar a thread inteira a cada turno era o maior custo de input do produto.
+ */
 export interface ChatRequest {
   threadId: string;
-  messages: ChatMessage[];
+  message: ChatMessage;
   context?: ChatContext;
 }
 

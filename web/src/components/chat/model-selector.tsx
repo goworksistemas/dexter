@@ -1,6 +1,8 @@
 /**
  * Seletor de modelo — modal com tabs, busca e ordenação.
- * Preços reais: entrada e saída USD/1M (sem média).
+ * Preços reais (entrada e saída por 1M tokens) exibidos em BRL, convertidos da
+ * tabela em USD dos providers. Cada item traz descrição amigável em pt-BR e
+ * "quando usar" (ver `modelFriendlyMeta`).
  */
 import * as React from "react"
 import {
@@ -35,11 +37,14 @@ import {
   modelCostTierClass,
   modelCostTierLabel,
   modelCostTierTextClass,
+  modelFriendlyMeta,
   modelHasPaidPrice,
   modelKeySource,
-  modelPricingDetail,
-  modelPricingHeadline,
-  modelPricingTag,
+  modelPricingDetailBrl,
+  modelPricingHeadlineBrl,
+  modelPricingTagBrl,
+  modelProfileClass,
+  modelProfileLabel,
   providerShortLabel,
   type ModelInfo,
   type ModelProvider,
@@ -80,12 +85,18 @@ function Tag({
   )
 }
 
-function ModelPricingTag({ model }: { model: ModelInfo }) {
+function ModelPricingTag({
+  model,
+  rate,
+}: {
+  model: ModelInfo
+  rate: number
+}) {
   const tier = modelCostTier(model)
   return (
     <Tag
-      label={modelPricingTag(model)}
-      title={modelPricingDetail(model)}
+      label={modelPricingTagBrl(model, rate)}
+      title={modelPricingDetailBrl(model, rate)}
       className={modelCostTierClass(tier)}
     />
   )
@@ -151,10 +162,12 @@ function sortModels(list: ModelInfo[], key: SortKey): ModelInfo[] {
 
 function ModelPickRow({
   model,
+  rate,
   selected,
   onSelect,
 }: {
   model: ModelInfo
+  rate: number
   selected: boolean
   onSelect: () => void
 }) {
@@ -162,8 +175,9 @@ function ModelPickRow({
   const ctx = modelContextHint(model)
   const prov = providerShortLabel(model)
   const tier = modelCostTier(model)
-  const price = modelPricingHeadline(model)
+  const price = modelPricingHeadlineBrl(model, rate)
   const paid = modelHasPaidPrice(model)
+  const friendly = modelFriendlyMeta(model)
 
   return (
     <button
@@ -181,6 +195,10 @@ function ModelPickRow({
           <span className="truncate font-medium text-foreground">
             {model.label}
           </span>
+          <Tag
+            label={modelProfileLabel(friendly.perfil)}
+            className={modelProfileClass(friendly.perfil)}
+          />
           <KeySourceTag model={model} />
         </span>
         <span className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
@@ -194,7 +212,7 @@ function ModelPickRow({
           </span>
           {paid ? (
             <span className="text-[11px] text-muted-foreground">
-              média (in+out)/2 · in · out · USD/1M ·{" "}
+              média (in+out)/2 · in · out · R$/1M ·{" "}
               {modelCostTierLabel(tier)}
             </span>
           ) : (
@@ -214,9 +232,13 @@ function ModelPickRow({
             </>
           ) : null}
         </span>
-        {model.description ? (
-          <span className="mt-1 block text-xs leading-snug text-muted-foreground/90">
-            {model.description}
+        <span className="mt-1 block text-xs leading-snug text-muted-foreground/90">
+          {friendly.descricao}
+        </span>
+        {friendly.quandoUsar ? (
+          <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground/75">
+            <strong className="font-medium">Quando usar:</strong>{" "}
+            {friendly.quandoUsar}
           </span>
         ) : null}
         <CapChips {...caps} />
@@ -247,6 +269,7 @@ export function ModelSelector({
     error,
     selectedModelId,
     selectedOffline,
+    usdBrlRate,
     selectModel,
     refreshModels,
   } = useModels()
@@ -276,19 +299,24 @@ export function ModelSelector({
     let list =
       tab === "all" ? models : models.filter((m) => m.provider === tab)
     if (q) {
-      list = list.filter(
-        (m) =>
+      list = list.filter((m) => {
+        const friendly = modelFriendlyMeta(m)
+        return (
           m.label.toLowerCase().includes(q) ||
           m.id.toLowerCase().includes(q) ||
           (m.description ?? "").toLowerCase().includes(q) ||
+          friendly.descricao.toLowerCase().includes(q) ||
+          friendly.quandoUsar.toLowerCase().includes(q) ||
+          modelProfileLabel(friendly.perfil).toLowerCase().includes(q) ||
           providerShortLabel(m).toLowerCase().includes(q) ||
-          modelPricingTag(m).toLowerCase().includes(q) ||
-          modelPricingDetail(m).toLowerCase().includes(q) ||
-          modelCostTierLabel(modelCostTier(m)).toLowerCase().includes(q),
-      )
+          modelPricingTagBrl(m, usdBrlRate).toLowerCase().includes(q) ||
+          modelPricingDetailBrl(m, usdBrlRate).toLowerCase().includes(q) ||
+          modelCostTierLabel(modelCostTier(m)).toLowerCase().includes(q)
+        )
+      })
     }
     return sortModels(list, sortKey)
-  }, [models, tab, query, sortKey])
+  }, [models, tab, query, sortKey, usdBrlRate])
 
   const pick = (id: string) => {
     onSelect(id)
@@ -344,7 +372,9 @@ export function ModelSelector({
           <span className="truncate">
             {isLoading ? "Modelo" : (modeloAtivo?.label ?? "Modelo")}
           </span>
-          {modeloAtivo ? <ModelPricingTag model={modeloAtivo} /> : null}
+          {modeloAtivo ? (
+            <ModelPricingTag model={modeloAtivo} rate={usdBrlRate} />
+          ) : null}
           {modeloAtivo && modelKeySource(modeloAtivo) === "personal" ? (
             <KeyRound
               className="size-3 shrink-0 text-violet-600 dark:text-violet-400"
@@ -365,8 +395,8 @@ export function ModelSelector({
           <DialogHeader className="shrink-0 space-y-1 border-b border-border px-4 py-3 text-left">
             <DialogTitle>Escolher modelo</DialogTitle>
             <DialogDescription>
-              Preço em USD/1M tokens: média (in+out)/2, entrada e saída. Ordene
-              pelo mais barato (entrada, depois saída).
+              Preço em reais por 1M de tokens: média (in+out)/2, entrada e
+              saída. Ordene pelo mais barato (entrada, depois saída).
             </DialogDescription>
           </DialogHeader>
 
@@ -456,6 +486,7 @@ export function ModelSelector({
                     <ModelPickRow
                       key={model.id}
                       model={model}
+                      rate={usdBrlRate}
                       selected={model.id === activeModelId}
                       onSelect={() => pick(model.id)}
                     />

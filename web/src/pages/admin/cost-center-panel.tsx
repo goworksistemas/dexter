@@ -21,7 +21,12 @@ import {
   type AdminCostCenter,
 } from "@/lib/admin/api"
 import { cn } from "@/lib/utils"
-import { fmtUsd } from "@/lib/format/money"
+import {
+  formatBRLTotal,
+  formatBRLWithUsd,
+  formatUsdReference,
+  useUsdBrlRate,
+} from "@/lib/models"
 
 const PERIODS = [
   { days: 7, label: "7d" },
@@ -38,6 +43,24 @@ function fmtCompact(n: number | null | undefined): string {
     notation: "compact",
     maximumFractionDigits: 1,
   }).format(Number(n ?? 0))
+}
+
+/** Célula de dinheiro: real em destaque, dólar de origem entre parênteses. */
+function Money({
+  usd,
+  rate,
+}: {
+  usd: number | null | undefined
+  rate: number
+}) {
+  return (
+    <span className="tabular-nums">
+      {formatBRLTotal(usd, rate)}{" "}
+      <span className="text-[11px] font-normal text-muted-foreground">
+        ({formatUsdReference(usd)})
+      </span>
+    </span>
+  )
 }
 
 function CreditBadge({ status }: { status: string }) {
@@ -93,7 +116,13 @@ function Kpi({
   )
 }
 
-function CostChart({ days }: { days: AdminCostCenter["by_day"] }) {
+function CostChart({
+  days,
+  rate,
+}: {
+  days: AdminCostCenter["by_day"]
+  rate: number
+}) {
   if (!days.length) {
     return (
       <p className="py-8 text-center text-sm text-muted-foreground">
@@ -112,7 +141,7 @@ function CostChart({ days }: { days: AdminCostCenter["by_day"] }) {
           <div
             key={d.day}
             className="group relative flex min-w-0 flex-1 flex-col items-center justify-end"
-            title={`${d.day}: ${fmtUsd(v)}`}
+            title={`${d.day}: ${formatBRLWithUsd(v, rate)}`}
           >
             <div
               className="w-full max-w-[14px] rounded-t-sm bg-primary/80 group-hover:bg-primary"
@@ -126,6 +155,7 @@ function CostChart({ days }: { days: AdminCostCenter["by_day"] }) {
 }
 
 export function AdminCostCenterPanel({ days }: { days: number }) {
+  const usdBrlRate = useUsdBrlRate()
   const [data, setData] = React.useState<AdminCostCenter | null>(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState<string | null>(null)
@@ -218,7 +248,9 @@ export function AdminCostCenterPanel({ days }: { days: number }) {
       <div className="mb-4 flex items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">
           Preços sincronizados automaticamente na discovery (LiteLLM + OpenRouter).
-          Custo = tokens × preço. Providers esgotados somem do seletor.
+          Custo = tokens × preço. Providers esgotados somem do seletor. Valores
+          em reais pela cotação do dia (US$ 1 = {formatBRLTotal(1, usdBrlRate)});
+          o dólar original fica entre parênteses.
         </p>
         <Button
           variant="outline"
@@ -239,8 +271,8 @@ export function AdminCostCenterPanel({ days }: { days: number }) {
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Kpi
           label="Custo total"
-          value={fmtUsd(t?.cost_usd)}
-          hint={`Últimos ${days} dias`}
+          value={formatBRLTotal(t?.cost_usd, usdBrlRate)}
+          hint={`Últimos ${days} dias · ${formatUsdReference(t?.cost_usd)}`}
           icon={Coins}
         />
         <Kpi
@@ -263,7 +295,7 @@ export function AdminCostCenterPanel({ days }: { days: number }) {
 
       <section className="mt-6 rounded-xl border border-border p-4">
         <h2 className="text-sm font-semibold">Gasto por dia</h2>
-        <CostChart days={data?.by_day ?? []} />
+        <CostChart days={data?.by_day ?? []} rate={usdBrlRate} />
       </section>
 
       <Tabs defaultValue="users" className="mt-6 gap-4">
@@ -306,14 +338,18 @@ export function AdminCostCenterPanel({ days }: { days: number }) {
                         </p>
                         <p className="text-xs text-muted-foreground">{u.email}</p>
                       </td>
-                      <td className="px-3 py-2 tabular-nums">{fmtUsd(u.cost_usd)}</td>
-                      <td className="px-3 py-2 tabular-nums">
-                        {fmtUsd(u.cost_usd_month)}
+                      <td className="px-3 py-2">
+                        <Money usd={u.cost_usd} rate={usdBrlRate} />
                       </td>
-                      <td className="px-3 py-2 tabular-nums text-muted-foreground">
-                        {u.usage_budget_usd != null
-                          ? fmtUsd(u.usage_budget_usd)
-                          : "—"}
+                      <td className="px-3 py-2">
+                        <Money usd={u.cost_usd_month} rate={usdBrlRate} />
+                      </td>
+                      <td className="px-3 py-2 text-muted-foreground">
+                        {u.usage_budget_usd != null ? (
+                          <Money usd={u.usage_budget_usd} rate={usdBrlRate} />
+                        ) : (
+                          "—"
+                        )}
                       </td>
                       <td className="px-3 py-2 tabular-nums text-muted-foreground">
                         {fmtNum(u.chats)}
@@ -358,8 +394,8 @@ export function AdminCostCenterPanel({ days }: { days: number }) {
                     <td className="px-3 py-2 text-xs text-muted-foreground">
                       {c.full_name || c.email || c.user_id}
                     </td>
-                    <td className="px-3 py-2 tabular-nums font-medium">
-                      {fmtUsd(c.cost_usd)}
+                    <td className="px-3 py-2 font-medium">
+                      <Money usd={c.cost_usd} rate={usdBrlRate} />
                     </td>
                     <td className="px-3 py-2 tabular-nums text-muted-foreground">
                       {fmtNum(c.messages)}
@@ -392,7 +428,9 @@ export function AdminCostCenterPanel({ days }: { days: number }) {
                     className="border-b border-border/60 last:border-0"
                   >
                     <td className="px-3 py-2 font-medium">{m.model}</td>
-                    <td className="px-3 py-2 tabular-nums">{fmtUsd(m.cost_usd)}</td>
+                    <td className="px-3 py-2">
+                      <Money usd={m.cost_usd} rate={usdBrlRate} />
+                    </td>
                     <td className="px-3 py-2 tabular-nums text-muted-foreground">
                       {fmtCompact(m.tokens)}
                     </td>
@@ -434,8 +472,8 @@ export function AdminCostCenterPanel({ days }: { days: number }) {
                           <p className="font-medium">{p.label || p.id}</p>
                           <p className="text-xs text-muted-foreground">{p.id}</p>
                         </td>
-                        <td className="px-3 py-2 tabular-nums">
-                          {fmtUsd(usage?.cost_usd ?? 0)}
+                        <td className="px-3 py-2">
+                          <Money usd={usage?.cost_usd ?? 0} rate={usdBrlRate} />
                         </td>
                         <td className="px-3 py-2">
                           <CreditBadge status={p.credit_status} />
@@ -524,7 +562,8 @@ export function AdminCostCenterPanel({ days }: { days: number }) {
                         <td className="px-3 py-2">
                           <p className="font-medium">{m.model}</p>
                           <p className="text-[11px] text-muted-foreground">
-                            {fmtUsd(m.cost_usd)} no período
+                            {formatBRLWithUsd(m.cost_usd, usdBrlRate)} no
+                            período
                           </p>
                         </td>
                         <td className="px-3 py-2">

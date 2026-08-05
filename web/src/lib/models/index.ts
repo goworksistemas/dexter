@@ -1,8 +1,26 @@
 // Barrel export do módulo de modelos de IA: catálogo (`GET /api/models`) e
 // escolha ativa, consumidos pelo header (`ModelSelector`) e pelo runtime do
 // chat (`useDexterRuntime`).
-export { ModelsProvider, useModels } from "./models-context"
+export { ModelsProvider, useModels, useUsdBrlRate } from "./models-context"
 export { fetchModels } from "./api"
+export {
+  FALLBACK_USD_BRL,
+  formatBRL,
+  formatBRLPerMillion,
+  formatBRLTotal,
+  formatBRLValue,
+  formatBRLWithUsd,
+  formatUsdReference,
+  normalizeRate,
+  rateHint,
+  usdToBrl,
+} from "./currency"
+export {
+  estimarCustoMensagem,
+  estimarTokens,
+  limparTextoParaEstimativa,
+} from "./cost-estimate"
+export type { EstimativaCusto, MensagemHistorico } from "./cost-estimate"
 export type {
   ModelCapabilities,
   ModelInfo,
@@ -24,12 +42,20 @@ export {
   modelCostTierClass,
   modelCostTierLabel,
   modelCostTierTextClass,
+  modelFriendlyMeta,
   modelHasPaidPrice,
   modelKeySource,
-  modelPricingDetail,
-  modelPricingHeadline,
+  modelPricingDetailBrl,
+  modelPricingHeadlineBrl,
   modelPricingTag,
+  modelPricingTagBrl,
+  modelProfileClass,
+  modelProfileLabel,
   pricingParts,
   providerShortLabel,
 } from "./model-meta"
-export type { ModelCostTier } from "./model-meta"
+export type {
+  ModelCostTier,
+  ModelFriendlyMeta,
+  ModelProfile,
+} from "./model-meta"

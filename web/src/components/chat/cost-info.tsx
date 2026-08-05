@@ -1,5 +1,6 @@
 /**
  * Botão "i" com detalhe de custo (mensagem ou conversa).
+ * Valores em reais: o banco guarda USD e a cotação vem de `GET /api/models`.
  */
 import { Info } from "lucide-react"
 
@@ -9,7 +10,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { fmtUsd, fmtUsdCost } from "@/lib/format/money"
+import { formatBRL, formatBRLTotal, rateHint, useUsdBrlRate } from "@/lib/models"
 import { cn } from "@/lib/utils"
 
 function formatTokens(n: number | null | undefined): string {
@@ -30,6 +31,7 @@ export function MessageCostInfo({
   model?: string | null
   className?: string
 }) {
+  const rate = useUsdBrlRate()
   const hasCost = costUsd != null && Number.isFinite(costUsd)
   const hasTokens =
     (tokensIn != null && tokensIn > 0) || (tokensOut != null && tokensOut > 0)
@@ -59,7 +61,7 @@ export function MessageCostInfo({
           <p>
             Total:{" "}
             <span className="tabular-nums">
-              {hasCost ? fmtUsdCost(costUsd) : "—"}
+              {hasCost ? formatBRL(costUsd, rate) : "—"}
             </span>
           </p>
           {hasTokens ? (
@@ -72,6 +74,9 @@ export function MessageCostInfo({
             <p className="truncate text-background/70" title={model}>
               Modelo: {model}
             </p>
+          ) : null}
+          {hasCost ? (
+            <p className="text-background/70">{rateHint(rate)}</p>
           ) : null}
         </TooltipContent>
       </Tooltip>
@@ -88,6 +93,7 @@ export function ChatCostInfo({
   className?: string
   compact?: boolean
 }) {
+  const rate = useUsdBrlRate()
   const value = Number(costUsd ?? 0)
   if (!Number.isFinite(value) || value <= 0) return null
 
@@ -102,21 +108,22 @@ export function ChatCostInfo({
               compact ? "size-5 justify-center" : "px-1 py-0.5 text-[11px]",
               className,
             )}
-            aria-label={`Custo da conversa: ${fmtUsd(value)}`}
+            aria-label={`Custo da conversa: ${formatBRLTotal(value, rate)}`}
             onClick={(e) => e.stopPropagation()}
           >
             <Info className="size-3" />
             {!compact ? (
-              <span className="tabular-nums">{fmtUsdCost(value)}</span>
+              <span className="tabular-nums">{formatBRL(value, rate)}</span>
             ) : null}
           </button>
         </TooltipTrigger>
         <TooltipContent side="top" className="max-w-56 px-3 py-2 text-xs">
           <p className="font-medium text-background">Custo desta conversa</p>
-          <p className="tabular-nums">{fmtUsd(value)}</p>
+          <p className="tabular-nums">{formatBRL(value, rate)}</p>
           <p className="text-background/75">
             Soma do uso de tokens das respostas do assistente.
           </p>
+          <p className="text-background/70">{rateHint(rate)}</p>
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
