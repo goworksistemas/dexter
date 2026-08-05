@@ -1,8 +1,9 @@
 /**
  * Seletor de modelo — modal com tabs, busca e ordenação.
- * Preços reais (entrada e saída por 1M tokens) exibidos em BRL, convertidos da
- * tabela em USD dos providers. Cada item traz descrição amigável em pt-BR e
- * "quando usar" (ver `modelFriendlyMeta`).
+ * Cada card destaca UM preço (média entrada/saída por milhão de tokens, em
+ * BRL convertido da tabela USD dos providers); entrada/saída separadas ficam
+ * em linha menor e apagada. Descrição amigável em pt-BR e "quando usar" vêm
+ * de `modelFriendlyMeta`.
  */
 import * as React from "react"
 import {
@@ -42,6 +43,7 @@ import {
   modelKeySource,
   modelPricingDetailBrl,
   modelPricingHeadlineBrl,
+  modelPricingInOutBrl,
   modelPricingTagBrl,
   modelProfileClass,
   modelProfileLabel,
@@ -176,6 +178,7 @@ function ModelPickRow({
   const prov = providerShortLabel(model)
   const tier = modelCostTier(model)
   const price = modelPricingHeadlineBrl(model, rate)
+  const entradaSaida = modelPricingInOutBrl(model, rate)
   const paid = modelHasPaidPrice(model)
   const friendly = modelFriendlyMeta(model)
 
@@ -211,10 +214,16 @@ function ModelPickRow({
             {price}
           </span>
           {paid ? (
-            <span className="text-[11px] text-muted-foreground">
-              média (in+out)/2 · in · out · R$/1M ·{" "}
-              {modelCostTierLabel(tier)}
-            </span>
+            <>
+              <span className="text-[11px] text-muted-foreground">
+                por milhão de tokens · {modelCostTierLabel(tier)}
+              </span>
+              {entradaSaida ? (
+                <span className="text-[10px] tabular-nums text-muted-foreground/60">
+                  {entradaSaida}
+                </span>
+              ) : null}
+            </>
           ) : (
             <span className="text-[11px] text-muted-foreground">
               sem cobrança por token
@@ -395,8 +404,8 @@ export function ModelSelector({
           <DialogHeader className="shrink-0 space-y-1 border-b border-border px-4 py-3 text-left">
             <DialogTitle>Escolher modelo</DialogTitle>
             <DialogDescription>
-              Preço em reais por 1M de tokens: média (in+out)/2, entrada e
-              saída. Ordene pelo mais barato (entrada, depois saída).
+              Preços em reais por milhão de tokens — quanto menor, mais barata
+              a conversa.
             </DialogDescription>
           </DialogHeader>
 

@@ -35,15 +35,30 @@ export function formatTokenCount(n?: number | null): string | null {
   return `${Math.floor(n).toLocaleString("pt-BR")} ctx`
 }
 
-/** Só contexto real (input). Não usa max out como fallback. */
-export function modelContextHint(model: ModelInfo): string | null {
-  const ctx = formatTokenCount(model.inputTokenLimit)
-  if (!ctx) return null
-  if (model.maxOutputTokens != null && model.maxOutputTokens > 0) {
-    const out = Math.floor(model.maxOutputTokens).toLocaleString("pt-BR")
-    return `${ctx} · saída ${out}`
+/** Tokens de forma legível: 1.048.576 → "1M", 65.536 → "66 mil". */
+export function formatTokensCompact(n: number): string {
+  if (n >= 1_000_000) {
+    const mi = Math.round((n / 1_000_000) * 10) / 10
+    return `${mi.toLocaleString("pt-BR")}M`
   }
-  return ctx
+  if (n >= 1_000) {
+    return `${Math.round(n / 1_000).toLocaleString("pt-BR")} mil`
+  }
+  return Math.floor(n).toLocaleString("pt-BR")
+}
+
+/**
+ * Só contexto real (input), em linguagem humana. Não usa max out como
+ * fallback. Ex.: "contexto 1M tokens · saída até 66 mil".
+ */
+export function modelContextHint(model: ModelInfo): string | null {
+  const ctx = model.inputTokenLimit
+  if (ctx == null || !Number.isFinite(ctx) || ctx <= 0) return null
+  const base = `contexto ${formatTokensCompact(ctx)} tokens`
+  if (model.maxOutputTokens != null && model.maxOutputTokens > 0) {
+    return `${base} · saída até ${formatTokensCompact(model.maxOutputTokens)}`
+  }
+  return base
 }
 
 export function formatUsdPerMillion(n: number | null | undefined): string {
@@ -181,40 +196,50 @@ export function modelKeySource(model: ModelInfo): ModelKeySource {
 // --- Preço em reais --------------------------------------------------------
 
 /**
- * Tag compacta em BRL: média em destaque + entrada→saída.
- * Ex.: "méd R$ 32,00 · R$ 12,80→R$ 51,20/1M"
+ * Tag compacta em BRL com UM valor só (a média entrada/saída).
+ * Ex.: "R$ 30,77/milhão". O detalhe entrada/saída vai no tooltip
+ * (`modelPricingDetailBrl`).
  */
 export function modelPricingTagBrl(
   model: PricingModel,
   rate: number | null | undefined,
 ): string {
   if (!modelHasPaidPrice(model)) return "Grátis"
-  const { inp, out } = pricingParts(model)
   const avg = modelAvgCostUsd(model)
-  const avgLabel = avg != null ? `méd ${formatBRLPerMillion(avg, rate)}` : null
-  if (inp != null && out != null) {
-    return `${avgLabel} · ${formatBRLPerMillion(inp, rate)}→${formatBRLPerMillion(out, rate)}/1M`
-  }
-  if (inp != null) return `${avgLabel} · ${formatBRLPerMillion(inp, rate)} in/1M`
-  return `${avgLabel} · ${formatBRLPerMillion(out, rate)} out/1M`
+  if (avg == null) return "—"
+  return `${formatBRLPerMillion(avg, rate)}/milhão`
 }
 
-/** Linha de preço do item da lista, em BRL: média + entrada + saída. */
+/**
+ * Valor único em destaque no card do seletor: a média entrada/saída em BRL.
+ * Ex.: "R$ 30,77" (o card complementa com "por milhão de tokens").
+ */
 export function modelPricingHeadlineBrl(
   model: PricingModel,
   rate: number | null | undefined,
 ): string {
   if (!modelHasPaidPrice(model)) return "Grátis"
-  const { inp, out } = pricingParts(model)
   const avg = modelAvgCostUsd(model)
-  const parts: string[] = []
-  if (avg != null) parts.push(`Méd ${formatBRLPerMillion(avg, rate)}`)
-  if (inp != null) parts.push(`In ${formatBRLPerMillion(inp, rate)}`)
-  if (out != null) parts.push(`Out ${formatBRLPerMillion(out, rate)}`)
-  return `${parts.join(" · ")}/1M`
+  return avg != null ? formatBRLPerMillion(avg, rate) : "—"
 }
 
-/** Texto explicativo em BRL (tooltip do preço). */
+/**
+ * Detalhe discreto de entrada/saída em BRL, por milhão de tokens.
+ * Ex.: "entrada R$ 10,26 · saída R$ 51,29". `null` quando não há preço.
+ */
+export function modelPricingInOutBrl(
+  model: PricingModel,
+  rate: number | null | undefined,
+): string | null {
+  if (!modelHasPaidPrice(model)) return null
+  const { inp, out } = pricingParts(model)
+  const parts: string[] = []
+  if (inp != null) parts.push(`entrada ${formatBRLPerMillion(inp, rate)}`)
+  if (out != null) parts.push(`saída ${formatBRLPerMillion(out, rate)}`)
+  return parts.length > 0 ? parts.join(" · ") : null
+}
+
+/** Texto explicativo em BRL (tooltip do preço) — autocontido e sem jargão. */
 export function modelPricingDetailBrl(
   model: PricingModel,
   rate: number | null | undefined,
@@ -222,14 +247,13 @@ export function modelPricingDetailBrl(
   if (!modelHasPaidPrice(model)) {
     return "Sem custo por uso (ex.: modelo local)"
   }
-  const { inp, out } = pricingParts(model)
   const avg = modelAvgCostUsd(model)
   const tier = COST_TIER_LABEL[modelCostTier(model)]
   const parts: string[] = []
-  if (avg != null) parts.push(`média ${formatBRLPerMillion(avg, rate)}/1M`)
-  if (inp != null) parts.push(`entrada ${formatBRLPerMillion(inp, rate)}/1M`)
-  if (out != null) parts.push(`saída ${formatBRLPerMillion(out, rate)}/1M`)
-  return `${parts.join(" · ")} · ${tier}`
+  if (avg != null) parts.push(`média ${formatBRLPerMillion(avg, rate)}`)
+  const inOut = modelPricingInOutBrl(model, rate)
+  if (inOut) parts.push(inOut)
+  return `Preço por milhão de tokens: ${parts.join(" · ")} · ${tier}`
 }
 
 // --- Descrição amigável ("o que é" / "quando usar") ------------------------

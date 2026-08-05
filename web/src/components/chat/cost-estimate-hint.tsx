@@ -4,7 +4,13 @@
  * Cálculo 100% local (ver `@/lib/models/cost-estimate`): usa o texto digitado, o
  * histórico que a thread já carregou e o preço do modelo que veio em
  * `GET /api/models`. Nenhuma requisição extra. Só aparece quando o modelo
- * escolhido tem preço conhecido.
+ * escolhido tem preço conhecido e há texto no campo.
+ *
+ * O recálculo é em tempo real, a cada tecla e a cada troca de modelo: a conta
+ * é aritmética simples sobre uma janela de no máximo 12 mensagens, então não
+ * precisa de debounce. Para o layout não pular, o elemento fica sempre montado
+ * (com a largura do valor) e só transiciona a opacidade quando o campo
+ * esvazia/enche.
  */
 import { useMemo } from "react"
 
@@ -13,7 +19,6 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { useDebouncedValue } from "@/hooks/use-debounced-value"
 import {
   estimarCustoMensagem,
   formatBRL,
@@ -41,18 +46,17 @@ export function CostEstimateHint({
   className?: string
 }) {
   const rate = useUsdBrlRate()
-  // Recalcular a cada tecla é desperdício: a conta varre o histórico inteiro.
-  const textoDebounced = useDebouncedValue(texto, 350)
+  const temTexto = texto.trim().length > 0
 
   const estimativa = useMemo(() => {
     if (!model) return null
     return estimarCustoMensagem({
-      texto: textoDebounced,
+      texto,
       historico,
       inputUsdPerMillion: model.inputUsdPerMillion,
       outputUsdPerMillion: model.outputUsdPerMillion,
     })
-  }, [model, textoDebounced, historico])
+  }, [model, texto, historico])
 
   if (!estimativa) return null
 
@@ -61,9 +65,11 @@ export function CostEstimateHint({
       <TooltipTrigger asChild>
         <span
           className={cn(
-            "cursor-default text-[11px] tabular-nums text-muted-foreground/80 transition-colors hover:text-muted-foreground",
+            "cursor-default whitespace-nowrap text-[11px] tabular-nums text-muted-foreground/80 transition-[color,opacity] duration-200 hover:text-muted-foreground",
+            temTexto ? "opacity-100" : "pointer-events-none opacity-0",
             className,
           )}
+          aria-hidden={!temTexto}
           aria-label={`Custo estimado desta mensagem: ${formatBRL(estimativa.usd, rate)}`}
         >
           ≈ {formatBRL(estimativa.usd, rate)} por mensagem

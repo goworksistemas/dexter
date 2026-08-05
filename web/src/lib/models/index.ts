@@ -47,6 +47,7 @@ export {
   modelKeySource,
   modelPricingDetailBrl,
   modelPricingHeadlineBrl,
+  modelPricingInOutBrl,
   modelPricingTag,
   modelPricingTagBrl,
   modelProfileClass,
