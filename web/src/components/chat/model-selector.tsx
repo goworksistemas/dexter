@@ -241,13 +241,19 @@ function ModelPickRow({
             </>
           ) : null}
         </span>
-        <span className="mt-1 block text-xs leading-snug text-muted-foreground/90">
+        <span className="mt-1 block text-[11px] leading-snug text-muted-foreground/75">
           {friendly.descricao}
         </span>
         {friendly.quandoUsar ? (
-          <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground/75">
-            <strong className="font-medium">Quando usar:</strong>{" "}
-            {friendly.quandoUsar}
+          // Orientação principal do card: bloco com borda à esquerda e texto
+          // em cor cheia, acima da descrição na hierarquia visual.
+          <span className="mt-1.5 block rounded-r-md border-l-2 border-primary/50 bg-primary/5 py-1 pr-2 pl-2.5">
+            <span className="block text-[10px] font-semibold tracking-wide text-primary/90 uppercase">
+              Quando usar
+            </span>
+            <span className="mt-0.5 block text-xs leading-snug text-foreground/90">
+              {friendly.quandoUsar}
+            </span>
           </span>
         ) : null}
         <CapChips {...caps} />

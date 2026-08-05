@@ -30,10 +30,17 @@ const HISTORICO_MAX_MENSAGENS = 12
 const TOKENS_SYSTEM_PROMPT = 3_000
 
 /**
- * Usado enquanto a conversa não tem nenhuma resposta com `tokens_out` medido:
- * ~1.500 tokens equivalem a uma resposta de mais ou menos uma página.
+ * Expectativa de resposta: o tamanho não cresce linearmente com a pergunta,
+ * então usamos uma base típica de chat (~600 tokens, uns 2–3 parágrafos) que
+ * cresce suavemente com o que foi digitado — prompts longos ("escreva um
+ * relatório sobre…") tendem a pedir gerações maiores — com teto de 2.048
+ * tokens para não inventar precisão que não existe. Quando a conversa já tem
+ * respostas com `tokens_out` medido, a média real entra como piso da
+ * expectativa (evidência melhor que qualquer heurística).
  */
-const TOKENS_SAIDA_PADRAO = 1_500
+const TOKENS_SAIDA_BASE = 600
+const TOKENS_SAIDA_POR_TOKEN_DIGITADO = 1.5
+const TOKENS_SAIDA_TETO = 2_048
 
 /** Uma mensagem já carregada na thread (usuário ou assistente). */
 export interface MensagemHistorico {
@@ -43,15 +50,19 @@ export interface MensagemHistorico {
 }
 
 export interface EstimativaCusto {
-  /** Custo previsto em USD (a UI converte para BRL). */
+  /** Custo total previsto em USD: entrada + resposta (a UI converte p/ BRL). */
   usd: number
+  /** Parcela da entrada (system + histórico + digitado) em USD. */
+  usdEntrada: number
+  /** Parcela da resposta esperada em USD. */
+  usdSaida: number
   tokensEntrada: number
   tokensSaida: number
   /** Quanto da entrada é histórico reenviado. */
   tokensHistorico: number
   tokensSystem: number
   tokensDigitado: number
-  /** true = saída baseada nas respostas reais desta conversa. */
+  /** true = expectativa de resposta ancorada nas respostas reais desta conversa. */
   saidaMedida: boolean
 }
 
@@ -98,22 +109,29 @@ export function estimarCustoMensagem(params: {
   const tokensEntrada =
     TOKENS_SYSTEM_PROMPT + tokensHistorico + tokensDigitado
 
+  // Heurística com teto: cresce com a mensagem, sem prometer precisão.
+  const saidaHeuristica = Math.min(
+    TOKENS_SAIDA_TETO,
+    TOKENS_SAIDA_BASE + tokensDigitado * TOKENS_SAIDA_POR_TOKEN_DIGITADO,
+  )
   const saidasMedidas = janela
     .map((m) => m.tokensOut)
     .filter((n): n is number => n != null && Number.isFinite(n) && n > 0)
   const saidaMedida = saidasMedidas.length > 0
-  const tokensSaida = saidaMedida
-    ? Math.round(
-        saidasMedidas.reduce((a, b) => a + b, 0) / saidasMedidas.length,
-      )
-    : TOKENS_SAIDA_PADRAO
+  const mediaMedida = saidaMedida
+    ? saidasMedidas.reduce((a, b) => a + b, 0) / saidasMedidas.length
+    : 0
+  // A média real da conversa é piso (não teto): se as respostas desta conversa
+  // vêm longas, uma pergunta curta não deve derrubar a expectativa.
+  const tokensSaida = Math.round(Math.max(mediaMedida, saidaHeuristica))
 
-  const usd =
-    (tokensEntrada / 1_000_000) * precoIn +
-    (tokensSaida / 1_000_000) * precoOut
+  const usdEntrada = (tokensEntrada / 1_000_000) * precoIn
+  const usdSaida = (tokensSaida / 1_000_000) * precoOut
 
   return {
-    usd,
+    usd: usdEntrada + usdSaida,
+    usdEntrada,
+    usdSaida,
     tokensEntrada,
     tokensSaida,
     tokensHistorico,
@@ -126,6 +144,7 @@ export function estimarCustoMensagem(params: {
 export {
   CHARS_POR_TOKEN,
   HISTORICO_MAX_MENSAGENS,
-  TOKENS_SAIDA_PADRAO,
+  TOKENS_SAIDA_BASE,
+  TOKENS_SAIDA_TETO,
   TOKENS_SYSTEM_PROMPT,
 }

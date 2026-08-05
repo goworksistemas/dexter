@@ -78,16 +78,18 @@ export function CostEstimateHint({
       <TooltipContent side="top" className="max-w-72 space-y-1 px-3 py-2 text-xs">
         <p className="font-medium text-background">Estimativa, não cobrança</p>
         <p className="text-background/80">
-          Entrada ≈ {fmtTokens(estimativa.tokensEntrada)} tokens:{" "}
+          Entrada ≈ {formatBRL(estimativa.usdEntrada, rate)} (
+          {fmtTokens(estimativa.tokensEntrada)} tokens):{" "}
           {fmtTokens(estimativa.tokensSystem)} de instruções e ferramentas,{" "}
           {fmtTokens(estimativa.tokensHistorico)} do histórico reenviado e{" "}
           {fmtTokens(estimativa.tokensDigitado)} do que você escreveu.
         </p>
         <p className="text-background/80">
-          Saída ≈ {fmtTokens(estimativa.tokensSaida)} tokens{" "}
+          Resposta ≈ {formatBRL(estimativa.usdSaida, rate)} (
+          {fmtTokens(estimativa.tokensSaida)} tokens){" "}
           {estimativa.saidaMedida
-            ? "(média real das respostas desta conversa)."
-            : "(média típica — esta conversa ainda não tem resposta medida)."}
+            ? "— com base nas respostas desta conversa e no tamanho da sua mensagem."
+            : "— expectativa típica, que cresce com o tamanho da sua mensagem."}
         </p>
         <p className="text-background/70">
           O valor real varia com o tamanho da resposta e com as ferramentas que o
